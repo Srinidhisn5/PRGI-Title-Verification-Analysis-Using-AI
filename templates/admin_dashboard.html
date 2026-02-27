@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PRGI Admin Dashboard</title>
+    <link rel="icon" href="{{ url_for('static', filename='assets/icons/favicon.ico') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/admin_styles.css') }}?v=1.0">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Header -->
+        <header class="dashboard-header">
+            <div class="header-left">
+                <h1>🏛️ Admin Dashboard</h1>
+            </div>
+            <div class="header-right">
+                <!-- KPI Strip (Idea 1) -->
+                <div class="kpi-strip">
+                    <div class="kpi-card">
+                        <div class="kpi-icon">✔</div>
+                        <div class="kpi-label">Approved</div>
+                        <div class="kpi-value">{{ submissions|selectattr('status', 'equalto', 'Approved')|list|length }}</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon">⏳</div>
+                        <div class="kpi-label">Pending</div>
+                        <div class="kpi-value">{{ submissions|selectattr('status', 'equalto', 'Pending')|list|length }}</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon">✖</div>
+                        <div class="kpi-label">Rejected</div>
+                        <div class="kpi-value">{{ submissions|selectattr('status', 'equalto', 'Rejected')|list|length }}</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon">⚠</div>
+                        <div class="kpi-label">High Risk</div>
+                        <div class="kpi-value">{{ submissions|selectattr('similarity_label', 'equalto', 'High')|list|length }}</div>
+                    </div>
+                </div>
+                <div class="admin-actions">
+                    <a href="{{ url_for('admin_logout') }}" class="btn-logout btn-pill" aria-label="Logout">
+                        <span>🔐</span>
+                        <span>Logout</span>
+                    </a>
+                    <a href="{{ url_for('dashboard') }}" class="btn-dashboard btn-pill" target="_blank" rel="noopener noreferrer" aria-label="Open Public Dashboard in new tab">
+                        <span class="btn-icon">📊</span>
+                        <span>Public Dashboard</span>
+                    </a>
+                    <a href="{{ url_for('export_approved') }}" class="btn-export btn-pill" title="Download approved titles CSV" aria-label="Download Approved CSV">
+                        <span class="btn-icon">⬇</span>
+                        <span>Download Approved CSV</span>
+                    </a>
+                </div>
+            </div>
+        </header>
+
+        <!-- Filters Section -->
+        <section class="filters-section">
+            <div class="filters-header">
+                <h2>🔍 Filters</h2>
+            </div>
+            <form method="GET" action="{{ url_for('admin_dashboard') }}" class="filters-form">
+                <div class="filters-grid">
+                    <div class="filter-group">
+                        <label for="status">Status</label>
+                        <select name="status" id="status" class="filter-select">
+                            <option value="">All Statuses</option>
+                            <option value="Pending" {% if selected_status == 'Pending' %}selected{% endif %}>Pending</option>
+                            <option value="Approved" {% if selected_status == 'Approved' %}selected{% endif %}>Approved</option>
+                            <option value="Rejected" {% if selected_status == 'Rejected' %}selected{% endif %}>Rejected</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="state">State</label>
+                        <select name="state" id="state" class="filter-select">
+                            <option value="">Select State</option>
+                            {% for s in states %}
+                                <option value="{{ s }}" {% if selected_state == s %}selected{% endif %}>{{ s }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="language">Language</label>
+                        <select name="language" id="language" class="filter-select">
+                            <option value="">Select Language</option>
+                            {% for l in languages %}
+                                <option value="{{ l }}" {% if selected_language == l %}selected{% endif %}>{{ l }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="filter-actions">
+                    <button type="submit" class="btn-apply">Apply Filters</button>
+                    <a href="{{ url_for('admin_dashboard') }}" class="btn-clear">Clear All</a>
+                </div>
+            </form>
+        </section>
+
+        <!-- Table Section -->
+        <section class="table-container">
+            <!-- AI Risk Legend (Idea 4) -->
+            <div class="risk-legend">
+                🟢 Low Risk   🟡 Medium Risk   🔴 High Risk
+            </div>
+            
+            <div class="table-wrapper">
+                <table class="admin-table">
+                    <thead>
+                        <tr>
+                            <th>Title</th>
+                            <th>Owner</th>
+                            <th>State</th>
+                            <th>Language</th>
+                            <th>Registration No</th>
+                            <th>Similarity %</th>
+                            <th>Risk</th>
+                            <th>Submitted Date</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for submission in submissions %}
+                        <tr data-id="{{ submission['id'] }}">
+                            <td>{{ submission['title'] }}</td>
+                            <td>{{ submission['owner'] }}</td>
+                            <td>{{ submission['state'] }}</td>
+                            <td>{{ submission['language'] }}</td>
+                            <td>{{ submission['registration_number'] }}</td>
+                            <td>{{ (submission['similarity_score'] or 0) | round(2) }}%</td>
+                            <td>
+                                <span class="risk-badge risk-{{ submission['similarity_label']|lower }}">
+                                    {{ submission['similarity_label'] or 'Unknown' }}
+                                </span>
+                            </td>
+                            <td>{{ submission['created_at'][:10] if submission['created_at'] else 'N/A' }}</td>
+                            <td>
+                                <span class="status-badge status-{{ submission['status']|lower }}">
+                                    {{ submission['status'] }}
+                                </span>
+                            </td>
+                            <td>
+                                <div class="action-buttons">
+                                    {% if submission['status'] == 'Pending' %}
+                                    <button type="button" class="btn-approve" data-action="approve" data-id="{{ submission['id'] }}">
+                                        <span>✅</span>
+                                        <span>Approve</span>
+                                    </button>
+                                    <button type="button" class="btn-reject" data-action="reject" data-id="{{ submission['id'] }}">
+                                        <span>❌</span>
+                                        <span>Reject</span>
+                                    </button>
+                                    {% endif %}
+                                </div>
+                            </td>
+                        </tr>
+
+                        {% else %}
+                        <tr>
+                            <td colspan="10" class="empty-state">
+                                <div class="empty-state-icon">📋</div>
+                                <div class="empty-state-text">No submissions found matching your criteria.</div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="dashboard-footer">
+            <p>© Government of India - Press Information Bureau | Secure Admin System</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/admin.js') }}?v=3" defer></script>
+</body>
+</html>

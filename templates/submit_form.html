@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PRGI AI Title Verification Engine</title>
+  <link rel="icon" href="{{ url_for('static', filename='assets/icons/favicon.ico') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/public_dark_styles.css') }}?v=8.0">
+  <style>
+    /* Clean Two-Column Layout - Mandatory */
+    :root {
+      --primary-bg: #0a0a0f;
+      --secondary-bg: #111118;
+      --panel-bg: #1a1a24;
+      --accent: #00d4ff;
+      --accent-2: #7c5cff;
+      --accent-cyan: #06b6d4;
+      --text-primary: #e6eef8;
+      --text-secondary: #cbd5e1;
+      --text-muted: #94a3b8;
+      --border-color: #27272a;
+      --glass-bg: rgba(255, 255, 255, 0.02);
+      --glass-border: rgba(255, 255, 255, 0.1);
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, var(--primary-bg) 0%, #0f0f1a 50%, var(--secondary-bg) 100%);
+      background-attachment: fixed;
+      color: var(--text-primary);
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+
+    /* Header */
+    .header {
+      text-align: center;
+      padding: 2rem 0;
+    }
+
+    .header h1 {
+      font-size: 2.5rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      background-clip: text;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 0.5rem;
+    }
+
+    .header p {
+      color: var(--text-secondary);
+      font-weight: 400;
+    }
+
+    /* MANDATORY: Two-Column Layout */
+    .two-column-layout {
+      display: grid;
+      grid-template-columns: 45% 55%;
+      gap: 2rem;
+      margin: 1.5rem 0;
+    }
+
+    @media (max-width: 1200px) {
+      .two-column-layout {
+        grid-template-columns: 1fr;
+        gap: 1.5rem;
+      }
+    }
+
+    /* LEFT PANEL - FORM INPUTS ONLY */
+    .left-panel {
+      background: var(--glass-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: 16px;
+      padding: 1.5rem;
+      backdrop-filter: blur(20px);
+    }
+
+    .left-panel h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    /* Form Elements */
+    .form-group {
+      margin-bottom: 1rem;
+    }
+
+    .form-group label {
+      display: block;
+      font-weight: 700;
+      color: var(--text-secondary);
+      margin-bottom: 0.4rem;
+      font-size: 0.9rem;
+    }
+
+    .form-input, .form-select {
+      width: 100%;
+      padding: 0.75rem;
+      background: var(--secondary-bg);
+      border: 2px solid var(--border-color);
+      border-radius: 10px;
+      color: var(--text-primary);
+      font-size: 0.95rem;
+      transition: all 0.3s ease;
+    }
+
+    .form-input:focus, .form-select:focus {
+      outline: none;
+      border-color: var(--accent-blue);
+      background: var(--panel-bg);
+    }
+
+    .title-input {
+      width: 100%;
+      padding: 1rem;
+      background: var(--secondary-bg);
+      border: 2px solid var(--border-color);
+      border-radius: 10px;
+      color: var(--text-primary);
+      font-size: 1rem;
+      font-weight: 600;
+      transition: all 0.3s ease;
+    }
+
+    .title-input:focus {
+      outline: none;
+      border-color: var(--accent-blue);
+      background: var(--panel-bg);
+    }
+
+    /* Form Grid */
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+
+    @media (max-width: 768px) {
+      .form-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Submit Button */
+    .submit-actions {
+      margin-top: 1.5rem;
+      text-align: center;
+    }
+
+    .btn-submit {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      border: none;
+      padding: 1rem 2.5rem;
+      border-radius: 12px;
+      color: #071021;
+      font-weight: 700;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      width: 100%;
+      box-shadow: 0 10px 30px rgba(124,92,255,0.12);
+    }
+
+    .btn-submit:not(.disabled):hover {
+      transform: translateY(-2px);
+    }
+
+    .btn-submit.disabled {
+      background: var(--border-color);
+      color: var(--text-muted);
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    /* RIGHT PANEL - AI ANALYSIS RESULTS ONLY */
+    .right-panel {
+      background: var(--panel-bg); /* solid dark background for contrast */
+      border: 1px solid var(--glass-border);
+      border-radius: 16px;
+      padding: 1.5rem;
+      /* removed backdrop blur to avoid text haze */
+      min-height: 400px;
+      display: none; /* Hidden by default - becomes visible after analysis */
+      opacity: 1;
+    }
+
+    .right-panel.visible {
+      display: block;
+    }
+
+    .right-panel h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border-color);
+      background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+      background-clip: text;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    /* Analysis Cards */
+    .analysis-card {
+      background: rgba(20, 20, 30, 0.85);
+      border-radius: 12px;
+      padding: 1.25rem;
+      border: 1px solid rgba(255,255,255,0.08);
+      margin-bottom: 1.25rem;
+      opacity: 1; /* ensure full opacity for content */
+    }
+
+    .analysis-card h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: #e5e7eb; /* section titles contrast */
+    }
+
+    /* Closest Match Badge */
+    .closest-match-badge {
+      display: inline-block;
+      background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+      color: var(--primary-bg);
+      padding: 0.5rem 1rem;
+      border-radius: 20px;
+      font-weight: 700;
+      font-size: 0.9rem;
+    }
+
+    .no-match-text {
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    /* AI Suggestions */
+    .suggestion-item {
+      background: var(--secondary-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 0.6rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .suggestion-text {
+      flex: 1;
+      font-weight: 500;
+      margin-right: 0.75rem;
+      font-size: 0.9rem;
+    }
+
+    .use-btn {
+      background: var(--accent-blue);
+      border: none;
+      color: var(--primary-bg);
+
+    /* Title spinner ring */
+    .title-spinner { display:flex; align-items:center; gap:8px; }
+    .spinner-ring { width:20px; height:20px; border-radius:50%; border:3px solid rgba(255,255,255,0.08); border-top-color:var(--accent); animation:spin 1s linear infinite; }
+    .spinner-low { border-top-color: #10b981; } /* green */
+    .spinner-medium { border-top-color: #f59e0b; } /* yellow */
+    .spinner-high { border-top-color: #ef4444; } /* red */
+
+    .muted { color: var(--text-muted); }
+    /* Contrast fixes for key elements */
+    .header h1 { color: #ffffff; }
+    .header p { color: #cbd5e1; }
+    .header-icon, .section-icon {
+      opacity: 1;
+      color: #60a5fa;
+      font-size: 1.1em;
+    }
+    #closestPrgiBlock, .match-text {
+      color: #f3f4f6; /* readable match result */
+      opacity: 1;
+    }
+    .right-panel, .analysis-card, .header { opacity: 1; }
+    .right-panel h2 { color: #e5e7eb; }
+    .analysis-card h3 .section-icon, .header h1 .header-icon {
+      opacity: 1;
+      color: #60a5fa;
+    }
+    /* prevent any low-opacity text */
+    .right-panel *, .analysis-card * { opacity: 1 !important; }
+    
+    .title-sim-percent { font-weight: 800; color: var(--accent); }
+    .title-risk-label { font-weight: 800; color: #f8fafc; }
+    .btn-icon { display:inline-block; font-size:1.05rem; }
+    .footer-brand span:first-child { font-size:1.25rem; }
+    .left-panel, .right-panel { border-radius: 16px; }
+    .analysis-card { border-radius: 12px; }
+
+    .closest-match-badge { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #071021; }
+
+    .ai-title-card { display:flex; align-items:center; gap:10px; background:var(--secondary-bg); padding:10px; border-radius:8px; margin-bottom:8px; border:1px solid var(--border-color); }
+    .ai-title { font-weight:600; }
+    .ai-badge { padding:6px 8px; border-radius:8px; font-weight:700; }
+
+      padding: 0.5rem 0.85rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.8rem;
+      transition: all 0.2s ease;
+    }
+
+    .use-btn:hover {
+      background: var(--accent-cyan);
+    }
+
+    /* Loading */
+    .loading {
+      text-align: center;
+      padding: 2rem;
+      color: var(--accent-blue);
+      font-weight: 600;
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid var(--border-color);
+      border-top-color: var(--accent-blue);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 1rem;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Error Banner */
+    .error-banner {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid #ef4444;
+      color: #ef4444;
+      padding: 1rem;
+      border-radius: 10px;
+      margin-bottom: 1rem;
+      font-weight: 600;
+    }
+
+    /* Footer */
+    .footer {
+      margin-top: 2rem;
+      padding: 1.5rem 0;
+      border-top: 1px solid var(--border-color);
+      text-align: center;
+    }
+
+    .footer-content {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 1.5rem;
+    }
+
+    .footer-brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+
+    .footer-badge {
+      background: var(--glass-bg);
+      border: 1px solid var(--glass-border);
+      color: var(--accent-blue);
+      padding: 0.4rem 0.8rem;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    /* Utility navigation strip (small and subtle) */
+    .utility-strip {
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      margin: 1rem 0 2rem 0;
+      opacity: 0.9;
+    }
+    .utility-content { display:inline-block; }
+    .utility-title { display:block; margin-bottom:0.25rem; }
+    .utility-links { display:block; }
+    .utility-link { color: var(--text-secondary); font-weight:700; text-decoration:none; margin:0 0.35rem; }
+    .utility-link:hover { text-decoration:underline; text-shadow: 0 0 6px rgba(6,182,212,0.12); cursor:pointer; }
+
+    /* Submit page compact action bar */
+    .submit-action-bar { display:flex; justify-content:center; margin:1.5rem 0; }
+    .action-bar-card {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.04);
+      padding: 0.6rem;
+      border-radius: 12px;
+      display: inline-flex;
+      gap: 0.75rem;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+      align-items: center;
+    }
+
+    .action-btn {
+      display:inline-flex;
+      align-items:center;
+      gap:0.6rem;
+      padding:0.65rem 1rem;
+      border-radius: 999px;
+      text-decoration:none;
+      font-weight:700;
+      font-size:0.98rem;
+      color:var(--text-primary);
+      transition: all 0.18s cubic-bezier(.2,.9,.2,1);
+      transform-origin:center;
+    }
+
+    .action-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #071021;
+      border: 1px solid rgba(255,255,255,0.06);
+      box-shadow: 0 8px 28px rgba(124,92,255,0.12);
+    }
+
+    .action-admin {
+      background: linear-gradient(135deg, rgba(45,35,25,0.95), rgba(75,55,20,0.92));
+      color: #fffbf5;
+      border: 1px solid rgba(245,158,11,0.16);
+      box-shadow: 0 6px 26px rgba(245,158,11,0.06) inset;
+      border-left: 3px solid rgba(245,158,11,0.9);
+    }
+
+    .action-btn:hover { transform: translateY(-3px) scale(1.04); }
+
+    .action-primary:hover { box-shadow: 0 12px 40px rgba(59,130,246,0.18); }
+    .action-admin:hover { box-shadow: 0 10px 34px rgba(245,158,11,0.18); filter: brightness(1.04); }
+
+    .action-btn:focus { outline: 3px solid rgba(59,130,246,0.12); box-shadow: 0 0 0 6px rgba(59,130,246,0.06); }
+    .btn-icon { font-size:1.05rem; }
+
+    /* Keep utility strip subtle (do not duplicate links) */
+    .utility-links { display:none !important; }
+
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .container { padding: 1rem; }
+      .header h1 { font-size: 1.75rem; }
+      .left-panel, .right-panel { padding: 1.25rem; }
+      .form-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <h1><span class="header-icon">📰</span> Publication Verification System</h1>
+      <p>AI-Powered Title Analysis & Registration</p>
+    </header>
+
+    <!-- MANDATORY: Two-Column Layout -->
+    {% if error %}
+      <div class="error-banner" role="alert">⚠️ {{ error }}</div>
+    {% endif %}
+    <div class="two-column-layout">
+      <!-- LEFT PANEL - FORM INPUTS ONLY -->
+      <div class="left-panel">
+        <h2>📝 Submit New Title</h2>
+
+        <form action="{{ url_for('submit_form') }}" method="post" id="submitForm">
+          <div id="formError" class="error-banner" style="display:none; margin-top:8px; padding:6px; font-weight:600;"></div>
+          <!-- Publication Title -->
+          <div class="form-group">
+            <label for="publication_title">Publication Title *</label>
+            <input
+              id="publication_title"
+              name="title"
+              type="text"
+              class="title-input"
+              placeholder="Enter your publication title..."
+              value="{{ form_data.title | default('') | e }}"
+              required
+              autocomplete="off"
+            />
+            <!-- Spinner container under title (hidden by default) -->
+            <div id="spinnerContainer" style="display:none; margin-top:10px;">
+              <div id="titleSpinner" class="title-spinner">
+                <div class="spinner-ring" id="titleSpinnerRing" aria-hidden="true"></div>
+                <div class="spinner-info"><span id="titleSimPercent" class="muted" style="margin-left:8px;"></span> <span id="titleRiskLabel" style="margin-left:8px; font-weight:700;"></span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Form Grid -->
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="ownerName">Owner Name *</label>
+              <input
+                id="ownerName"
+                name="owner"
+                type="text"
+                class="form-input"
+                placeholder="Owner/Publisher name..."
+                value="{{ form_data.owner | default('') | e }}"
+                required
+              />
+            </div>
+
+            <div class="form-group">
+              <label for="ownerEmail">Email Address *</label>
+              <input
+                id="ownerEmail"
+                name="email"
+                type="email"
+                class="form-input"
+                placeholder="email@example.com"
+                value="{{ form_data.email | default('') | e }}"
+                required
+              />
+              <div id="emailError" class="error-banner" style="display:none; margin-top:8px; padding:6px; font-weight:600; background:rgba(239,68,68,0.06); border:1px solid #ef4444; color:#ef4444; border-radius:8px;">Invalid email address</div>
+            </div>
+
+            <div class="form-group">
+              <label for="stateSelect">State *</label>
+              <select id="stateSelect" name="state" class="form-select" required>
+                <option value="">Select State...</option>
+                <option value="Andhra Pradesh" {{ 'selected' if form_data.state == 'Andhra Pradesh' else '' }}>Andhra Pradesh</option>
+                <option value="Arunachal Pradesh" {{ 'selected' if form_data.state == 'Arunachal Pradesh' else '' }}>Arunachal Pradesh</option>
+                <option value="Assam" {{ 'selected' if form_data.state == 'Assam' else '' }}>Assam</option>
+                <option value="Bihar" {{ 'selected' if form_data.state == 'Bihar' else '' }}>Bihar</option>
+                <option value="Chhattisgarh" {{ 'selected' if form_data.state == 'Chhattisgarh' else '' }}>Chhattisgarh</option>
+                <option value="Delhi" {{ 'selected' if form_data.state == 'Delhi' else '' }}>Delhi</option>
+                <option value="Goa" {{ 'selected' if form_data.state == 'Goa' else '' }}>Goa</option>
+                <option value="Gujarat" {{ 'selected' if form_data.state == 'Gujarat' else '' }}>Gujarat</option>
+                <option value="Haryana" {{ 'selected' if form_data.state == 'Haryana' else '' }}>Haryana</option>
+                <option value="Himachal Pradesh" {{ 'selected' if form_data.state == 'Himachal Pradesh' else '' }}>Himachal Pradesh</option>
+                <option value="Jharkhand" {{ 'selected' if form_data.state == 'Jharkhand' else '' }}>Jharkhand</option>
+                <option value="Karnataka" {{ 'selected' if form_data.state == 'Karnataka' else '' }}>Karnataka</option>
+                <option value="Kerala" {{ 'selected' if form_data.state == 'Kerala' else '' }}>Kerala</option>
+                <option value="Madhya Pradesh" {{ 'selected' if form_data.state == 'Madhya Pradesh' else '' }}>Madhya Pradesh</option>
+                <option value="Maharashtra" {{ 'selected' if form_data.state == 'Maharashtra' else '' }}>Maharashtra</option>
+                <option value="Manipur" {{ 'selected' if form_data.state == 'Manipur' else '' }}>Manipur</option>
+                <option value="Meghalaya" {{ 'selected' if form_data.state == 'Meghalaya' else '' }}>Meghalaya</option>
+                <option value="Mizoram" {{ 'selected' if form_data.state == 'Mizoram' else '' }}>Mizoram</option>
+                <option value="Nagaland" {{ 'selected' if form_data.state == 'Nagaland' else '' }}>Nagaland</option>
+                <option value="Odisha" {{ 'selected' if form_data.state == 'Odisha' else '' }}>Odisha</option>
+                <option value="Punjab" {{ 'selected' if form_data.state == 'Punjab' else '' }}>Punjab</option>
+                <option value="Rajasthan" {{ 'selected' if form_data.state == 'Rajasthan' else '' }}>Rajasthan</option>
+                <option value="Sikkim" {{ 'selected' if form_data.state == 'Sikkim' else '' }}>Sikkim</option>
+                <option value="Tamil Nadu" {{ 'selected' if form_data.state == 'Tamil Nadu' else '' }}>Tamil Nadu</option>
+                <option value="Telangana" {{ 'selected' if form_data.state == 'Telangana' else '' }}>Telangana</option>
+                <option value="Tripura" {{ 'selected' if form_data.state == 'Tripura' else '' }}>Tripura</option>
+                <option value="Uttar Pradesh" {{ 'selected' if form_data.state == 'Uttar Pradesh' else '' }}>Uttar Pradesh</option>
+                <option value="Uttarakhand" {{ 'selected' if form_data.state == 'Uttarakhand' else '' }}>Uttarakhand</option>
+                <option value="West Bengal" {{ 'selected' if form_data.state == 'West Bengal' else '' }}>West Bengal</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="languageSelect">Language *</label>
+              <select id="languageSelect" name="language" class="form-select" required>
+                <option value="">Select Language...</option>
+                <option value="English" {{ 'selected' if form_data.language == 'English' else '' }}>English</option>
+                <option value="Hindi" {{ 'selected' if form_data.language == 'Hindi' else '' }}>Hindi</option>
+                <option value="Bengali" {{ 'selected' if form_data.language == 'Bengali' else '' }}>Bengali</option>
+                <option value="Telugu" {{ 'selected' if form_data.language == 'Telugu' else '' }}>Telugu</option>
+                <option value="Marathi" {{ 'selected' if form_data.language == 'Marathi' else '' }}>Marathi</option>
+                <option value="Tamil" {{ 'selected' if form_data.language == 'Tamil' else '' }}>Tamil</option>
+                <option value="Urdu" {{ 'selected' if form_data.language == 'Urdu' else '' }}>Urdu</option>
+                <option value="Gujarati" {{ 'selected' if form_data.language == 'Gujarati' else '' }}>Gujarati</option>
+                <option value="Kannada" {{ 'selected' if form_data.language == 'Kannada' else '' }}>Kannada</option>
+                <option value="Malayalam" {{ 'selected' if form_data.language == 'Malayalam' else '' }}>Malayalam</option>
+                <option value="Odia" {{ 'selected' if form_data.language == 'Odia' else '' }}>Odia</option>
+                <option value="Punjabi" {{ 'selected' if form_data.language == 'Punjabi' else '' }}>Punjabi</option>
+                <option value="Assamese" {{ 'selected' if form_data.language == 'Assamese' else '' }}>Assamese</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="regNumber">Registration Number *</label>
+            <input
+              id="regNumber"
+              name="registration_number"
+              type="text"
+              class="form-input"
+              placeholder="e.g., RNI/2024/12345"
+              value="{{ form_data.registration_number | default('') | e }}"
+              required
+            />
+            <div id="regError" class="error-banner" style="display:none; margin-top:8px; padding:6px; font-weight:600; background:rgba(239,68,68,0.06); border:1px solid #ef4444; color:#ef4444; border-radius:8px;">Registration number already exists</div>
+          </div>
+
+          <!-- Submit Button -->
+          <div class="submit-actions">
+            <button type="submit" id="submitBtn" class="btn-submit disabled" disabled>
+              📝 Complete All Fields
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <!-- RIGHT PANEL - AI ANALYSIS RESULTS ONLY -->
+      <div class="right-panel" id="aiPanel">
+        <h2>✨ AI Analysis Results</h2>
+
+        <!-- Loading State -->
+        <div id="aiLoader" class="loading" style="display: none;">
+          <div class="spinner"></div>
+          <p>Analyzing title...</p>
+        </div>
+
+        <!-- Analysis wrapper (hidden by default) -->
+        <div id="titleAnalysisSection" style="display:none;">
+
+          <!-- Closest Match Card -->
+          <div id="closestContainer" class="analysis-card">
+            <h3><span class="section-icon">🎯</span> Closest PRGI Match</h3>
+            <div id="closestPrgiBlock" class="match-text"></div>
+          </div>
+
+          <!-- Spinner area -->
+          <div id="spinnerContainerArea" class="analysis-card" style="margin-bottom:0.5rem; display:none;">
+            <div id="spinnerContainer"></div>
+          </div>
+
+          <!-- AI Suggestions Card -->
+          <div id="suggestedContainer" class="analysis-card" style="display:none;">
+            <h3><span class="section-icon">🪄</span> AI Suggested Titles</h3>
+            <!-- Generate button appears only when current title risk is LOW -->
+            <div style="margin-bottom:10px;"><button type="button" id="aiGenerateBtn" class="btn-submit" style="padding:6px 10px; font-size:0.9rem; display:none;">Generate AI Titles</button></div>
+            <div id="aiSuggestions" class="suggestions"></div>
+          </div>
+
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Action Buttons (primary actions centered, immediately below the form card) -->
+    <div class="submit-action-bar" role="navigation" aria-label="Submission actions">
+      <div class="action-bar-card">
+        <a href="/dashboard" class="action-btn action-primary" title="Public Dashboard" aria-label="Open public dashboard">
+          <span class="btn-icon">📊</span>
+          <span>Public Dashboard</span>
+        </a>
+        <a href="/admin/login" class="action-btn action-admin" target="_blank" rel="noopener noreferrer" title="Admin Dashboard (login required)" aria-label="Open admin login in a new tab">
+          <span class="btn-icon">🔐</span>
+          <span>Admin Dashboard</span>
+        </a>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <div class="footer-content">
+        <div class="footer-brand">
+          <span>📰</span>
+          <span>PRGI Publication Registry</span>
+        </div>
+        <div class="footer-badge">AI-Powered Verification</div>
+      </div>
+      </footer>
+    </div>
+
+  <script src="{{ url_for('static', filename='js/submit.js') }}?v=9.0"></script>
+</body>
+</html>

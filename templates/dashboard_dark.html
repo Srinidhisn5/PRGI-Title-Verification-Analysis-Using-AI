@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Public Title Verification Dashboard</title>
+    <link rel="icon" href="{{ url_for('static', filename='assets/icons/favicon.ico') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/public_dark_styles.css') }}?v=2.0">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}?v=2.1">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="dashboard-header">
+            <div class="header-left">
+                <div class="logo">
+                  <span class="logo-icon">📰</span>
+                  <span class="logo-text">PRGI Publication Registry</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="page-title">Public Title Verification Dashboard</div>
+                <div class="page-subtitle">PRGI Publication Registry – AI Verified</div>
+                <div class="header-actions">
+                  <a href="{{ url_for('submit_form') }}" class="submit-link top-submit">
+                      <span>📝</span>
+                      <span>Submit New Title</span>
+                  </a>
+                  <a href="{{ url_for('admin_login') }}" class="admin-link" target="_blank" rel="noopener noreferrer" aria-label="Open admin login in a new tab">
+                      <span>🔒</span>
+                      <span>Admin Login</span>
+                  </a>
+                </div>
+            </div>
+        </header>
+
+        <!-- KPI Cards -->
+        <section class="kpi-grid">
+            <div class="kpi-card kpi-approved">
+                <div class="kpi-icon">✅</div>
+                <div class="kpi-label">Approved Titles</div>
+                <div class="kpi-value">{{ stats.approved_count }}</div>
+            </div>
+            <div class="kpi-card kpi-pending">
+                <div class="kpi-icon">⏳</div>
+                <div class="kpi-label">Pending Titles</div>
+                <div class="kpi-value">{{ stats.pending_count }}</div>
+            </div>
+            <div class="kpi-card kpi-rejected">
+                <div class="kpi-icon">❌</div>
+                <div class="kpi-label">Rejected Titles</div>
+                <div class="kpi-value">{{ stats.rejected_count }}</div>
+            </div>
+            <div class="kpi-card kpi-avg">
+                <div class="kpi-icon">📊</div>
+                <div class="kpi-label">Avg Similarity %</div>
+                <div class="kpi-value">{{ "%.1f"|format(avg_similarity) }}%</div>
+            </div>
+        </section>
+
+        <!-- Search Section -->
+        <section class="search-section">
+            <div class="search-header">
+                <h2>🔍 Title Status Search</h2>
+            </div>
+            <form method="get" action="{{ url_for('dashboard') }}" class="search-form">
+                <input type="text" name="search" id="search" class="search-input" 
+                       value="{{ request.args.get('search', '') }}" 
+                       placeholder="Search by publication title or registration number">
+
+                <!-- Optional UI-only filters (no backend changes) -->
+                <select name="status" class="filter-dropdown">
+                    <option value="">All Statuses</option>
+                    <option value="Approved" {% if request.args.get('status') == 'Approved' %}selected{% endif %}>Approved</option>
+                    <option value="Pending" {% if request.args.get('status') == 'Pending' %}selected{% endif %}>Pending</option>
+                    <option value="Rejected" {% if request.args.get('status') == 'Rejected' %}selected{% endif %}>Rejected</option>
+                </select>
+
+                <select name="state_filter" class="filter-dropdown">
+                    <option value="">All States</option>
+                    {% for st in state_distribution.labels %}
+                    <option value="{{ st }}" {% if request.args.get('state_filter') == st %}selected{% endif %}>{{ st }}</option>
+                    {% endfor %}
+                </select>
+
+                <select name="language_filter" class="filter-dropdown">
+                    <option value="">All Languages</option>
+                    {% for lg in language_distribution.labels %}
+                    <option value="{{ lg }}" {% if request.args.get('language_filter') == lg %}selected{% endif %}>{{ lg }}</option>
+                    {% endfor %}
+                </select>
+
+                <button type="submit" class="search-btn">Search</button>
+            </form> 
+        </section>
+
+        <!-- Search Results -->
+        {% if search_results %}
+        <section class="results-section">
+            <div class="section-header">
+                Search Results ({{ search_results|length }} found)
+            </div>
+            <div class="table-container">
+                <table class="public-table">
+                    <thead>
+                        <tr>
+                            <th>Title</th>
+                            <th>Owner</th>
+                            <th>State</th>
+                            <th>Language</th>
+                            <th>Similarity %</th>
+                            <th>Risk Level</th>
+                            <th>Final Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for submission in search_results %}
+                        <tr>
+                            <td>{{ submission['title'] }}</td>
+                            <td>{{ submission['owner'] }}</td>
+                            <td>{{ submission['state'] }}</td>
+                            <td>{{ submission['language'] }}</td>
+                            <td>{{ (submission['similarity_score'] or 0) | round(2) }}%</td>
+                            <td>
+                                <span class="risk-badge risk-{{ submission['similarity_label']|lower }}">
+                                    {{ submission['similarity_label'] or 'Unknown' }}
+                                </span>
+                            </td>
+                            <td>
+                                <span class="status-badge status-{{ submission['status']|lower }}">
+                                    {{ submission['status'] }}
+                                </span>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- AI Insights Section -->
+        <section class="insights-section">
+            <div class="insights-header">
+                <h2>🤖 AI Insights</h2>
+            </div>
+            <div class="insights-grid">
+                <div class="insight-card">
+                    <div class="insight-title">Most Common Words</div>
+                    <div class="insight-content">
+                        {% if common_words %}
+                        {% for word, count in common_words[:5] %}
+                        <span style="background: rgba(59, 130, 246, 0.2); padding: 2px 8px; border-radius: 12px; margin: 2px; display: inline-block; font-size: 0.8rem;">{{ word }} ({{ count }})</span>
+                        {% endfor %}
+                        {% else %}
+                        <p>No data available yet. Submit more titles to see insights.</p>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="insight-card">
+                    <div class="insight-title">High-Risk Keywords</div>
+                    <div class="insight-content">
+                        {% if high_risk_keywords %}
+                        {% for keyword in high_risk_keywords[:5] %}
+                        <span style="background: rgba(239, 68, 68, 0.2); padding: 2px 8px; border-radius: 12px; margin: 2px; display: inline-block; font-size: 0.8rem;">{{ keyword }}</span>
+                        {% endfor %}
+                        {% else %}
+                        <p>No high-risk keywords detected yet.</p>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="insight-card">
+                    <div class="insight-title">Submission Trends</div>
+                    <div class="insight-content">
+                        <p><strong>Total Submissions:</strong> {{ stats.total_submissions }}</p>
+                        <p><strong>Approval Rate:</strong> {{ "%.1f"|format(approval_rate) }}%</p>
+                        <p><strong>Rejection Rate:</strong> {{ "%.1f"|format(rejection_rate) }}%</p>
+                    </div>
+                </div>
+                <div class="insight-card">
+                    <div class="insight-title">Risk Distribution</div>
+                    <div class="insight-content">
+                        <p><strong>Low Risk:</strong> {{ risk_distribution.low }}%</p>
+                        <p><strong>Medium Risk:</strong> {{ risk_distribution.medium }}%</p>
+                        <p><strong>High Risk:</strong> {{ risk_distribution.high }}%</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Charts Section -->
+        <section class="charts-section">
+            <div class="charts-header">
+                <h2>📈 Analytics & Trends</h2>
+            </div>
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <div class="chart-title">Titles by State</div>
+                    <div class="chart-box">
+                        <canvas id="stateChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">Titles by Language</div>
+                    <div class="chart-box">
+                        <canvas id="languageChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">Approval Trend (Last 7 Days)</div>
+                    <div class="chart-box">
+                        <canvas id="approvalChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title">Risk Distribution</div>
+                    <div class="chart-box">
+                        <canvas id="riskChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Recent Approved Titles -->
+        <section class="results-section">
+            <div class="section-header">
+                Recent Approved Titles (Last 10)
+            </div>
+            {% if recent_approved %}
+            <div class="table-container">
+                <table class="public-table">
+                    <thead>
+                        <tr>
+                            <th>Title</th>
+                            <th>State</th>
+                            <th>Language</th>
+                            <th>Approved Date</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for submission in recent_approved %}
+                        <tr>
+                            <td class="title-cell"><strong>{{ submission['title'] }}</strong></td>
+                            <td>{{ submission['state'] }}</td>
+                            <td>{{ submission['language'] }}</td>
+                            <td>{{ submission['created_at'][:10] if submission['created_at'] else 'N/A' }}</td>
+                            <td><span class="status-badge status-approved">Approved</span></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-state">
+                <div class="empty-state-icon">📋</div>
+                <div class="empty-state-text">No approved titles found yet.</div>
+            </div>
+            {% endif %}
+        </section>
+
+        <!-- Footer -->
+        <footer class="dashboard-footer">
+            <p>Public Title Verification Portal – Government of India (Demo)</p>
+            <p style="margin-top: 0.5rem; font-size: 0.75rem; color: #64748b;">
+                This is a public portal for citizens to check the status of their title submissions.
+            </p>
+        </footer>
+    </div>
+
+    <script>
+        // Chart.js configurations
+        const chartOptions = {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            resizeDelay: 200,
+            plugins: {
+                legend: {
+                    display: true,
+                    labels: {
+                        color: '#94a3b8',
+                        font: { size: 12 }
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    grid: { color: '#334155' },
+                    ticks: { color: '#94a3b8' }
+                },
+                x: {
+                    grid: { color: '#334155' },
+                    ticks: { color: '#94a3b8' }
+                }
+            }
+        };
+
+        // Chart instance management to prevent re-creation
+        let chartInstances = {};
+        let chartsInitialized = false;
+
+        // Set global Chart.js defaults to prevent resize loops
+        Chart.defaults.resizeDelay = 200;
+
+        function createChart(canvasId, type, data, options) {
+            const canvas = document.getElementById(canvasId);
+            if (!canvas) return null;
+
+            // Destroy existing chart if it exists
+            if (chartInstances[canvasId]) {
+                chartInstances[canvasId].destroy();
+            }
+
+            const ctx = canvas.getContext('2d');
+            chartInstances[canvasId] = new Chart(ctx, {
+                type: type,
+                data: data,
+                options: options
+            });
+
+            return chartInstances[canvasId];
+        }
+
+        // Initialize charts only once when DOM is ready
+        document.addEventListener('DOMContentLoaded', function() {
+            if (chartsInitialized) return;
+            chartsInitialized = true;
+            // State Chart
+            createChart('stateChart', 'bar', {
+                labels: {{ state_distribution.labels|tojson }},
+                datasets: [{
+                    label: 'Submissions',
+                    data: {{ state_distribution.data|tojson }},
+                    backgroundColor: 'rgba(59, 130, 246, 0.8)',
+                    borderColor: 'rgba(59, 130, 246, 1)',
+                    borderWidth: 1
+                }]
+            }, chartOptions);
+
+            // Language Chart
+            createChart('languageChart', 'doughnut', {
+                labels: {{ language_distribution.labels|tojson }},
+                datasets: [{
+                    data: {{ language_distribution.data|tojson }},
+                    backgroundColor: [
+                        'rgba(59, 130, 246, 0.8)',
+                        'rgba(139, 92, 246, 0.8)',
+                        'rgba(34, 197, 94, 0.8)',
+                        'rgba(245, 158, 11, 0.8)',
+                        'rgba(239, 68, 68, 0.8)'
+                    ]
+                }]
+            }, {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        labels: { color: '#94a3b8', font: { size: 12 } }
+                    }
+                }
+            });
+
+            // Approval Trend Chart
+            createChart('approvalChart', 'line', {
+                labels: {{ approval_trend.labels|tojson }},
+                datasets: [{
+                    label: 'Approved',
+                    data: {{ approval_trend.approved|tojson }},
+                    borderColor: 'rgba(34, 197, 94, 1)',
+                    backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                    fill: true,
+                    tension: 0.4
+                }, {
+                    label: 'Pending',
+                    data: {{ approval_trend.pending|tojson }},
+                    borderColor: 'rgba(245, 158, 11, 1)',
+                    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                    fill: true,
+                    tension: 0.4
+                }]
+            }, chartOptions);
+
+            // Risk Distribution Chart
+            createChart('riskChart', 'pie', {
+                labels: ['Low Risk', 'Medium Risk', 'High Risk'],
+                datasets: [{
+                    data: [{{ risk_distribution.low }}, {{ risk_distribution.medium }}, {{ risk_distribution.high }}],
+                    backgroundColor: [
+                        'rgba(34, 197, 94, 0.8)',
+                        'rgba(245, 158, 11, 0.8)',
+                        'rgba(239, 68, 68, 0.8)'
+                    ]
+                }]
+            }, {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        labels: { color: '#94a3b8', font: { size: 12 } }
+                    }
+                }
+            });
+        });
+    </script>
+</body>
+</html>
