@@ -1,0 +1,31 @@
+.similarity-ring {
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  background: conic-gradient(#22c55e 0deg, #1f2933 0deg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.7s ease-out;
+}
+
+.ring-inner {
+  width: 78px;
+  height: 78px;
+  background: #0f172a;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#ringScore {
+  font-size: 18px;
+  font-weight: 700;
+  color: #22c55e;
+}
+
+/* Global icon utilities */
+.btn-icon { font-size: 1.05rem; display: inline-block; line-height: 1; }
+.icon { font-size: 1.2rem; color: #e6eef8; }
+.small-muted { color: #94a3b8; font-size: 0.9rem; }

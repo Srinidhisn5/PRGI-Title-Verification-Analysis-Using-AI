@@ -1,0 +1,57 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Continue files
+.continue/
+
+# Database files
+database.db
+database_backup.db
+
+# Test and debug HTML files
+test_*.html
+final_*.html
+
+# Test and debug Python files
+test_*.py
+final_*.py
+check_*.py
+simple_test.py
+verify_fixes.py
+
+# Configuration and temporary files
+cookies.txt
+*.log
+*.tmp
+
+# IDE specific files
+.vscode/
+.idea/
+
+# Environment files
+.env
+.env.local
+.venv/
+
+# Node modules (if any)
+node_modules/
+
+# Build artifacts
+dist/
+build/
+*.exe
+*.dll
+
+# Coverage and test reports
+coverage/
+*.cov
+*.xml
+*.html
+*.txt
+
+# Mac/Windows specific
+.DS_Store
+Thumbs.db
