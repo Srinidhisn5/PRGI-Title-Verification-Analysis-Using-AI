@@ -1,11 +1,21 @@
 import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 BASE_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(BASE_DIR, 'database', 'database.db')
-
+import logging
+from transformers import pipeline
+# load model once
+generator = pipeline(
+    "text-generation",
+    model="distilgpt2",
+    device=-1
+)
 from flask import Flask, render_template, request, redirect, url_for, g, jsonify, session, send_from_directory
+from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from prgi_dataset import load_prgi_titles
 from similarity_engine import compare_title, initialize_prgi_system, find_closest_title_match, classify_risk, get_titles_from_database, normalize_text
 
@@ -13,7 +23,15 @@ from similarity_engine import compare_title, initialize_prgi_system, find_closes
 PRGI_TITLES = load_prgi_titles()
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
-app.secret_key = 'prgi_admin_secret_key_2025_secure_gov_system'
+app.secret_key = os.environ.get("SECRET_KEY", "dev_key")
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax'
+)
+
+logging.basicConfig(level=logging.INFO)
+
+MAX_DAILY_USAGE = 5
 
 def get_db():
     db = getattr(g, '_database', None)
@@ -27,22 +45,36 @@ def init_db():
     conn = get_db()
     cur = conn.cursor()
     cur.execute('''
-        CREATE TABLE IF NOT EXISTS submissions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            owner TEXT NOT NULL,
-            email TEXT NOT NULL,
-            state TEXT NOT NULL,
-            language TEXT NOT NULL,
-            registration_number TEXT NOT NULL,
-            similarity_score REAL DEFAULT 0.0,
-            similarity_label TEXT DEFAULT 'Unknown',
-            created_at TEXT NOT NULL,
-            status TEXT DEFAULT 'Pending'
+    CREATE TABLE IF NOT EXISTS submissions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        email TEXT NOT NULL,
+        state TEXT NOT NULL,
+        language TEXT NOT NULL,
+        registration_number TEXT NOT NULL,
+        similarity_score REAL DEFAULT 0.0,
+        similarity_label TEXT DEFAULT 'Unknown',
+        created_at TEXT NOT NULL,
+        status TEXT DEFAULT 'Pending',
+        user_id INTEGER
+    )
+''')
+    # USERS TABLE
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        email TEXT UNIQUE,
+        password TEXT,
+        trust_score INTEGER DEFAULT 50,
+        usage_count INTEGER DEFAULT 0,
+        last_used_date TEXT
         )
-    ''')
+    """)
     # Ensure a uniqueness constraint on registration_number via a unique index
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_registration_number ON submissions(registration_number)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON submissions(user_id)")
     conn.commit()
 
 # Admin Authentication Constants
@@ -58,30 +90,163 @@ def admin_required(f):
         return f(*args, **kwargs)
     return admin_wrapper
 
+def login_required(f):
+    """Decorator to require user authentication"""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get('user_id'):
+            return redirect(url_for('login_page'))
+        return f(*args, **kwargs)
+    return wrapper
+
 @app.teardown_appcontext
 def close_connection(exception):
     db = getattr(g, '_database', None)
     if db is not None:
         db.close()
 
+@app.errorhandler(500)
+def internal_error(e):
+    logging.error("Internal server error", exc_info=e)
+    return render_template("error.html", message="Something went wrong"), 500
+
 @app.route('/')
 def index():
     # Friendly root redirect to the submit page
     return redirect(url_for('submit_form'))
 
+@app.route('/login_page')
+def login_page():
+    return render_template('login.html')
+
+@app.route('/user/login', methods=['POST'])
+def user_login():
+    data = request.form
+
+    db = get_db()
+    cur = db.cursor()
+
+    cur.execute("SELECT * FROM users WHERE email=?", (data['email'],))
+    user = cur.fetchone()
+
+    if user and check_password_hash(user['password'], data['password']):
+        session['user_id'] = user['id']
+        return redirect(url_for('submit_form'))
+
+    return render_template("login.html", error="Invalid email or password")
+
+@app.route('/user/register', methods=['POST'])
+def user_register():
+    data = request.form
+
+    db = get_db()
+    cur = db.cursor()
+
+    try:
+        hashed_password = generate_password_hash(data['password'])
+
+        cur.execute("""
+        INSERT INTO users (name, email, password)
+        VALUES (?, ?, ?)
+        """, (data['name'], data['email'], hashed_password))
+
+        db.commit()
+        return redirect(url_for('login_page'))
+
+    except sqlite3.IntegrityError:
+        return "Email already exists. Try another."
+
+@app.route('/my_submissions')
+def my_submissions():
+    if not session.get('user_id'):
+        return redirect(url_for('login_page'))
+
+    user_id = session.get('user_id')
+
+    db = get_db()
+    cur = db.cursor()
+
+    cur.execute("""
+    SELECT * FROM submissions WHERE user_id = ?
+    ORDER BY id DESC
+    """, (user_id,))
+
+    submissions = cur.fetchall()
+
+    return render_template('my_submissions.html', submissions=submissions)
+
+@app.route('/register_page')
+def register_page():
+    return render_template('register.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('user_id', None)
+    return redirect(url_for('login_page'))
+
 @app.route("/submit_form", methods=["GET", "POST"])
+@login_required
 def submit_form():
+    trust_score = 50
+    user = None
+    if session.get('user_id'):
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("SELECT trust_score FROM users WHERE id=?", (session['user_id'],))
+        user = cur.fetchone()
+    if user:
+        trust_score = user['trust_score'] 
+
     result = None
     error = None
     form_data = {}
 
     if request.method == "POST":
+        conn = get_db()
+        cur = conn.cursor()
         title = request.form.get("title", "").strip()
         owner = request.form.get("owner", "").strip()
         email = request.form.get("email", "").strip()
         state = request.form.get("state", "").strip()
         language = request.form.get("language", "").strip()
         registration_number = request.form.get("registration_number", "").strip()
+
+        title = normalize_text(title)
+        user_id = session.get('user_id')
+
+        cur.execute("""
+        SELECT trust_score, usage_count, last_used_date 
+        FROM users 
+        WHERE id = ?
+        """, (user_id,))
+
+        user = cur.fetchone()
+        if not user:
+            return redirect(url_for('login_page'))
+
+        today = str(date.today())
+
+        usage_count = user['usage_count'] or 0
+        last_used_date = user['last_used_date'] or ""
+        trust_score = user['trust_score']
+
+        # Reset if new day
+        if last_used_date != today:
+            usage_count = 0
+            cur.execute("""
+            UPDATE users SET usage_count = 0, last_used_date = ?
+            WHERE id = ?
+            """, (today, user_id))
+            conn.commit()
+
+        # LIMIT CHECK
+        if usage_count >= MAX_DAILY_USAGE:
+            return render_template(
+                "submit_form.html",
+                error="🚫 Daily limit reached. Try again tomorrow.",
+                form_data=form_data,
+                trust_score=trust_score
+            )
 
         form_data = {
             "title": title,
@@ -91,6 +256,29 @@ def submit_form():
             "language": language,
             "registration_number": registration_number
         }
+
+        # 🔥 DUPLICATE CHECK (ADD HERE)
+        cur.execute("""
+        SELECT 1 FROM submissions 
+        WHERE LOWER(TRIM(title)) = LOWER(TRIM(?)) AND user_id = ?
+        """, (title, user_id))
+
+        existing = cur.fetchone()
+
+        if existing:
+            similarity_score = 100
+            similarity_label = "High"
+
+            return render_template(
+                "submit_form.html",
+                result={
+                    "similarity_score": similarity_score,
+                    "similarity_label": similarity_label
+                },
+                error="⚠ Exact duplicate title found in system",
+                form_data=form_data,
+                trust_score=trust_score
+            )
 
         # Run similarity ALWAYS (do not block on validation) — compute against CSV PRGI dataset
         try:
@@ -104,10 +292,8 @@ def submit_form():
                 "closest_title": similarity_analysis.get('closest_title'),
                 "risk_explanation": risk_explanation,
                 "analysis_status": "success" if similarity_score > 0 else "failed"
-                
             }
         except Exception as e:
-            print('WARN: similarity check failed:', e)
             similarity_score, similarity_label = 0.0, 'Low'
             similarity_result = {
                 "similarity": 0.0,
@@ -120,7 +306,7 @@ def submit_form():
         result = {
             "similarity_score": similarity_score,
             "similarity_label": similarity_label,
-            "closest_title": similarity_result.get("closest_title", "") if 'similarity_result' in locals() else ""
+            "closest_title": similarity_result.get("closest_title", "")
         }
 
         # Validation: if missing fields -> show error but include AI result
@@ -130,7 +316,8 @@ def submit_form():
                 "submit_form.html",
                 error=error,
                 form_data=form_data,
-                result=result
+                result=result,
+                trust_score=trust_score
             )
 
         # Server-side email validation (simple format check)
@@ -141,12 +328,11 @@ def submit_form():
                 "submit_form.html",
                 error=error,
                 form_data=form_data,
-                result=result
+                result=result,
+                trust_score=trust_score
             )
 
         # Uniqueness check (do NOT insert if exists; show error + AI result)
-        conn = get_db()
-        cur = conn.cursor()
         cur.execute(
             "SELECT 1 FROM submissions WHERE registration_number = ?",
             (registration_number,)
@@ -157,7 +343,8 @@ def submit_form():
                 "submit_form.html",
                 error=error,
                 form_data=form_data,
-                result=result
+                result=result,
+                trust_score=trust_score
             )
 
         # Block HIGH risk submissions (server-side enforcement)
@@ -167,43 +354,66 @@ def submit_form():
                 "submit_form.html",
                 error=error,
                 form_data=form_data,
-                result=result
+                result=result,
+                trust_score=trust_score
             )
 
         # Insert new submission (concurrency-safe - catch unique constraint errors)
         created_at = datetime.now(timezone.utc).isoformat()
         try:
             cur.execute("""
-                INSERT INTO submissions
-                (title, owner, email, state, language, registration_number, created_at, similarity_score, similarity_label)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO submissions (
+                    title, owner, email, state, language,
+                    registration_number, similarity_score,
+                    similarity_label, created_at, status, user_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 title, owner, email, state, language,
-                registration_number,
-                created_at,
-                similarity_score, similarity_label
+                registration_number, similarity_score,
+                similarity_label, created_at, "Pending", user_id
             ))
+
             conn.commit()
+
+            today = str(date.today())
+            usage_count += 1
+
+            if similarity_score < 30:
+                trust_score += 2
+            elif similarity_score > 70:
+                trust_score -= 3
+
+            trust_score = max(0, min(100, trust_score))
+
+            cur.execute("""
+            UPDATE users SET trust_score = ?, usage_count = ?, last_used_date = ?
+            WHERE id = ?
+            """, (trust_score, usage_count, today, user_id))
+
+            conn.commit()
+
+            logging.info(f"User {user_id} submitted title: {title}")
+
         except sqlite3.IntegrityError:
-            # This handles race conditions where another process inserted the same reg number
             error = "Registration number already exists."
             return render_template(
                 "submit_form.html",
                 error=error,
                 form_data=form_data,
-                result=result
+                result=result,
+                trust_score=trust_score
             )
 
-        # Redirect to success
-        # pass submission id to success for clarity
         submission_id = cur.lastrowid
         return redirect(url_for('success', submission_id=submission_id))
 
     return render_template(
         "submit_form.html",
-        error=error,
-        form_data=form_data,
-        result=result
+        error=None,
+        form_data={},
+        result=None,
+        trust_score=trust_score
     )
 
 @app.route('/success')
@@ -362,7 +572,6 @@ def dashboard():
 def api_dashboard_stats():
 
     db = get_db()
-    db.commit()
     cur = db.cursor()
 
     # basic stats
@@ -444,6 +653,7 @@ def api_dashboard_stats():
     "trend_approved": trend_approved,
     "trend_pending": trend_pending
 })
+
 @app.route("/api/admin_stats")
 @admin_required
 def admin_stats():
@@ -465,6 +675,7 @@ def admin_stats():
         "pending": pending,
         "rejected": rejected
     })
+
 def get_common_words(titles):
     """Extract common words from titles for AI insights"""
     if not titles:
@@ -590,15 +801,10 @@ def get_similar_prgi_titles(input_title):
 
         # Ensure system is initialized
         if SBERT_MODEL is None or PRGI_EMBEDDINGS is None or PRGI_TITLES is None:
-            print("DATABASE FETCH: System not initialized, using fallback")
             return []
 
         # 🔥 DEBUGGING LOG: Show total PRGI titles available
-        print(f"TOTAL PRGI TITLES USED FOR SIMILARITY: {len(PRGI_TITLES)}")
-        print("SAMPLE PRGI TITLES:")
-        for i, title in enumerate(PRGI_TITLES[:5]):
-            print(f"  {i+1}. {title}")
-
+            
         # Generate embedding for input title
         input_embedding = SBERT_MODEL.encode([input_title])
 
@@ -635,8 +841,6 @@ def get_similar_prgi_titles(input_title):
                     "similarity": sim_score
                 })
                 # 🔥 DEBUGGING LOG: Show closest title
-                print(f"CLOSEST PRGI TITLE: {prgi_title}")
-                print(f"CLOSEST SIMILARITY SCORE: {sim_score}")
                 closest_found = True
                 # If we only need one, we can break here, but continue for top 5
                 if len(similar_titles) >= 1:
@@ -652,8 +856,6 @@ def get_similar_prgi_titles(input_title):
                 "title": fallback_title,
                 "similarity": fallback_score
             })
-            print(f"FALLBACK CLOSEST PRGI TITLE: {fallback_title}")
-            print(f"FALLBACK SIMILARITY SCORE: {fallback_score}")
 
         # Continue to find up to 5 similar titles (optional enhancement)
         if len(similar_titles) < 5:
@@ -781,7 +983,6 @@ def admin_dashboard():
         selected_language=language
     )
 
-
 @app.route('/admin/export-approved')
 @admin_required
 def export_approved():
@@ -900,8 +1101,7 @@ def api_check_registration():
 
 @app.route('/generate_ai_titles', methods=['POST'])
 def generate_ai_titles():
-
-    from rapidfuzz import fuzz
+    import re
     import random
 
     data = request.get_json()
@@ -910,93 +1110,68 @@ def generate_ai_titles():
     if not title:
         return jsonify([])
 
-    words = title.split()
+    try:
+        # Clean input
+        words = re.findall(r"[a-zA-Z]+", title)
+        if not words:
+            return jsonify([])
 
-    # newspaper style prefixes
-    prefixes = [
-        "National",
-        "India",
-        "Bharat",
-        "Regional",
-        "Public",
-        "Modern",
-        "Independent",
-        "Global"
-    ]
+        base_word = words[0].title()
 
-    # publication suffixes
-    suffixes = [
-        "Chronicle",
-        "Herald",
-        "Gazette",
-        "Review",
-        "Journal",
-        "Dispatch",
-        "Bulletin",
-        "Observer",
-        "Post"
-    ]
+        # Strong publication words
+        prefixes = ["National", "Bharat", "India", "Public", "Regional"]
+        suffixes = ["Chronicle", "Gazette", "Bulletin", "Journal", "Review"]
 
-    conn = get_db()
-    cur = conn.cursor()
+        # Generate structured titles (HIGH QUALITY)
+        structured_titles = []
+        for i in range(5):
+            p = random.choice(prefixes)
+            s = random.choice(suffixes)
+            structured_titles.append(f"{p} {base_word} {s}")
 
-    cur.execute("SELECT title FROM submissions")
-    db_titles = [row[0] for row in cur.fetchall()]
+        # OPTIONAL: AI variation (adds intelligence)
+        prompt = f"Generate 3 professional newspaper titles based on: {title}"
 
-    existing_titles = db_titles + PRGI_TITLES
+        ai_results = generator(
+            prompt,
+            max_length=40,
+            num_return_sequences=3,
+            do_sample=True,
+            temperature=0.7,
+            truncation=True,
+            pad_token_id=50256
+        )
 
-    suggestions = []
+        ai_titles = []
+        for r in ai_results:
+            text = r['generated_text']
+            text = text.replace(prompt, "").strip()
 
-    # extract main word from title
-    # remove common publication words
-    stop_words = [
-    "india","indian","daily","weekly","monthly","news","times",
-    "digest","post","express","journal","review"
-]
+            text = re.sub(r"[^a-zA-Z\s]", "", text)
+            text = " ".join(text.split())
 
-    base_word = None
+            words = text.split()
+            if len(words) >= 2:
+                clean = " ".join(words[:4]).title()
+                ai_titles.append(clean)
 
-    for w in words:
-        if w.lower() not in stop_words:
-            base_word = w
-            break
+        # Combine both (BEST RESULT)
+        final_titles = list(set(structured_titles + ai_titles))
 
-    if not base_word:
-        base_word = words[0] if words else "India"
-    # generate structured newspaper names
-    for _ in range(20):
+        # Ensure 5 titles
+        return jsonify([{"title": t} for t in final_titles[:5]])
 
-        prefix = random.choice(prefixes)
-        suffix = random.choice(suffixes)
+    except Exception as e:
+        print("AI error:", e)
 
-        new_title = f"{prefix} {base_word} {suffix}"
-
-        max_similarity = 0
-
-        for existing in existing_titles:
-            sim = fuzz.ratio(new_title.lower(), existing.lower())
-            max_similarity = max(max_similarity, sim)
-
-        if max_similarity < 60:
-            suggestions.append({
-                "title": new_title,
-                "similarity": max_similarity
-            })
-
-        if len(suggestions) >= 5:
-            break
-
-    # fallback if nothing found
-    if not suggestions:
-        suggestions = [
-            {"title": f"National {base_word} Chronicle", "similarity": 20},
-            {"title": f"{base_word} Gazette", "similarity": 18},
-            {"title": f"Public {base_word} Review", "similarity": 22},
-            {"title": f"Regional {base_word} Bulletin", "similarity": 19},
-            {"title": f"Independent {base_word} Journal", "similarity": 17}
+        fallback = [
+            {"title": f"National {title} Chronicle"},
+            {"title": f"{title} Gazette"},
+            {"title": f"Public {title} Review"},
+            {"title": f"Regional {title} Bulletin"},
+            {"title": f"Independent {title} Journal"}
         ]
-
-    return jsonify(suggestions[:5])
+        return jsonify(fallback)
 
 @app.route('/api/suggest_titles', methods=['GET'])
 def api_suggest_titles():

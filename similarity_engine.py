@@ -6,7 +6,8 @@ os.environ["TRANSFORMERS_NO_TF"] = "1"
 import re
 import unicodedata
 import sqlite3
-from typing import List, Dict, Any
+import pandas as pd
+from typing import List
 
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -17,15 +18,15 @@ import jellyfish
 # GLOBALS
 # =========================
 SBERT_MODEL = None
-PRGI_TITLES = []
-PRGI_EMBEDDINGS = None
+ALL_TITLES = []
+ALL_EMBEDDINGS = None
 
 BASE_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(BASE_DIR, 'database', 'database.db')
 
 
 # =========================
-# INITIALIZATION
+# INIT MODEL
 # =========================
 def initialize_sbert_model():
     global SBERT_MODEL
@@ -33,6 +34,20 @@ def initialize_sbert_model():
         print("✅ Loading SBERT model...")
         SBERT_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
     return SBERT_MODEL
+
+
+# =========================
+# LOAD CLEAN DATASET
+# =========================
+def load_clean_titles():
+    try:
+        df = pd.read_csv("database/cleaned_titles.csv")
+        titles = df["title"].dropna().tolist()
+        print(f"✅ Loaded cleaned titles: {len(titles)}")
+        return titles
+    except Exception as e:
+        print("❌ Error loading cleaned dataset:", e)
+        return []
 
 
 # =========================
@@ -51,43 +66,29 @@ def normalize_text(text: str) -> str:
 
 
 # =========================
-# LOAD DATASET
+# INITIALIZE SYSTEM
 # =========================
-def load_prgi_data():
-    global PRGI_TITLES, PRGI_EMBEDDINGS
+def initialize_system():
+    global ALL_TITLES, ALL_EMBEDDINGS
 
-    try:
-        from prgi_dataset import load_prgi_titles
-        PRGI_TITLES = load_prgi_titles()
+    initialize_sbert_model()
 
-        print(f"✅ Loaded PRGI titles: {len(PRGI_TITLES)}")
+    ALL_TITLES = load_clean_titles()
 
-        # 🔥 IMPORTANT
-        initialize_sbert_model()
-        PRGI_EMBEDDINGS = SBERT_MODEL.encode(PRGI_TITLES)
+    print("🚀 Generating embeddings (one-time)...")
+    ALL_EMBEDDINGS = SBERT_MODEL.encode(
+        ALL_TITLES,
+        batch_size=64,
+        show_progress_bar=True
+    )
 
-        print("🚀 PRGI embeddings precomputed")
-
-    except Exception as e:
-        print("❌ Dataset load error:", e)
-        PRGI_TITLES = []
-        PRGI_EMBEDDINGS = None
+    print("✅ System ready")
 
 
 # =========================
-# 🔥 HYBRID SIMILARITY
+# HYBRID SIMILARITY
 # =========================
 def calculate_similarity(title1: str, title2: str) -> float:
-    """
-    Hybrid Similarity based on your paper:
-
-    Hybrid = 0.2 * Phonetic + 0.3 * String + 0.5 * Semantic
-    """
-
-    global SBERT_MODEL
-
-    if SBERT_MODEL is None:
-        initialize_sbert_model()
 
     t1 = normalize_text(title1)
     t2 = normalize_text(title2)
@@ -95,30 +96,20 @@ def calculate_similarity(title1: str, title2: str) -> float:
     if not t1 or not t2:
         return 0.0
 
-    # -------------------------
-    # 1. Semantic (SBERT)
-    # -------------------------
+    # Semantic
     emb1 = SBERT_MODEL.encode([t1])
     emb2 = SBERT_MODEL.encode([t2])
     semantic_score = cosine_similarity(emb1, emb2)[0][0]
 
-    # -------------------------
-    # 2. String (TF-IDF)
-    # -------------------------
+    # String
     tfidf = TfidfVectorizer().fit_transform([t1, t2])
     string_score = cosine_similarity(tfidf[0:1], tfidf[1:2])[0][0]
 
-    # -------------------------
-    # 3. Phonetic (Metaphone)
-    # -------------------------
+    # Phonetic
     meta1 = jellyfish.metaphone(t1)
     meta2 = jellyfish.metaphone(t2)
-
     phonetic_score = 1.0 if meta1 == meta2 and meta1 != "" else 0.0
 
-    # -------------------------
-    # 🔥 HYBRID FORMULA
-    # -------------------------
     final_score = (
         0.2 * phonetic_score +
         0.3 * string_score +
@@ -129,7 +120,7 @@ def calculate_similarity(title1: str, title2: str) -> float:
 
 
 # =========================
-# RISK CLASSIFICATION
+# RISK
 # =========================
 def classify_risk(score: float) -> str:
     if score >= 60:
@@ -141,144 +132,112 @@ def classify_risk(score: float) -> str:
 
 
 # =========================
-# CORE FUNCTION (NO BREAK)
+# FAST COMPARE (MAIN)
 # =========================
-def compare_title(user_title: str, prgi_titles=None):
+def compare_title(user_title: str, titles=None):
 
     try:
         if not user_title:
-            return {
-                "similarity": 0,
-                "risk": "Low",
-                "closest_title": None
-            }
+            return {"similarity": 0, "risk": "Low", "closest_title": None}
 
-        if prgi_titles is None:
-            if not PRGI_TITLES:
-                load_prgi_data()
-            prgi_titles = PRGI_TITLES
+        if not ALL_TITLES or ALL_EMBEDDINGS is None:
+            initialize_system()
 
-        best_score = 0
-        best_title = None
-
-        # 🔥 PRECOMPUTE INPUT EMBEDDING ONCE
         t1 = normalize_text(user_title)
+
+        # Encode once
         input_emb = SBERT_MODEL.encode([t1])
 
-        for i, title in enumerate(prgi_titles):
+        similarities = cosine_similarity(input_emb, ALL_EMBEDDINGS)[0]
 
-            t2 = normalize_text(title)
+        # 🔥 TOP 5 MATCHES
+        top_indices = similarities.argsort()[-5:][::-1]
 
-            # =========================
-            # 🔥 FAST SEMANTIC (USING PRECOMPUTED EMBEDDINGS)
-            # =========================
-            semantic_score = cosine_similarity(
-                input_emb,
-                [PRGI_EMBEDDINGS[i]]
-            )[0][0]
+        top_matches = []
+        scores_list = []
 
-            # =========================
-            # STRING (TF-IDF)
-            # =========================
-            tfidf = TfidfVectorizer().fit_transform([t1, t2])
+        for idx in top_indices:
+            title = ALL_TITLES[idx]
+            semantic_score = similarities[idx]
+
+            # String score
+            tfidf = TfidfVectorizer().fit_transform([t1, title])
             string_score = cosine_similarity(tfidf[0:1], tfidf[1:2])[0][0]
 
-            # =========================
-            # PHONETIC (Metaphone)
-            # =========================
+            # Phonetic score
             meta1 = jellyfish.metaphone(t1)
-            meta2 = jellyfish.metaphone(t2)
+            meta2 = jellyfish.metaphone(title)
             phonetic_score = 1.0 if meta1 == meta2 and meta1 != "" else 0.0
 
-            # =========================
-            # 🔥 HYBRID SCORE
-            # =========================
-            score = (
+            # Hybrid score
+            final_score = (
                 0.2 * phonetic_score +
                 0.3 * string_score +
                 0.5 * semantic_score
             ) * 100
 
-            if score > best_score:
-                best_score = score
-                best_title = title
+            scores_list.append(final_score)
 
-        risk = classify_risk(best_score)
+            # 🔥 Explanation
+            common_words = set(t1.split()) & set(title.split())
 
-        if best_score >= 60:
-            explanation = "High similarity with existing PRGI titles."
-        elif best_score >= 25:
-            explanation = "Moderate similarity detected."
+            top_matches.append({
+                "title": title,
+                "score": round(final_score, 2),
+                "common_words": list(common_words)
+            })
+
+        # Best match
+        best_match = top_matches[0]
+        best_score = best_match["score"]
+
+        # 🔥 Dynamic threshold
+        avg_score = sum(scores_list) / len(scores_list)
+
+        if best_score >= avg_score + 10:
+            risk = "High"
+        elif best_score >= avg_score:
+            risk = "Medium"
         else:
-            explanation = "Title appears unique."
+            risk = "Low"
+
+        # 🔥 Confidence
+        confidence = min(100, round(best_score, 2))
 
         return {
-            "similarity": round(best_score, 2),
+            "similarity": best_score,
             "risk": risk,
-            "closest_title": best_title,
-            "explanation": explanation
+            "closest_title": best_match["title"],
+
+            # NEW FEATURES (won’t break UI)
+            "top_matches": top_matches,
+            "confidence": confidence,
+            "dynamic_threshold": round(avg_score, 2)
         }
 
     except Exception as e:
         print("Error:", e)
-        return {
-            "similarity": 0,
-            "risk": "Low",
-            "closest_title": None
-        }
+        return {"similarity": 0, "risk": "Low", "closest_title": None}
+
 
 # =========================
-# INIT
+# COMPATIBILITY FUNCTIONS
 # =========================
-try:
-    initialize_sbert_model()
-    load_prgi_data()
-except Exception as e:
-    print("Startup error:", e)
-    
 def initialize_prgi_system():
-    """
-    🔥 Compatibility function (DO NOT REMOVE)
+    initialize_system()
 
-    Keeps your app.py working without changes
-    """
-    try:
-        initialize_sbert_model()
-        load_prgi_data()
-        print("✅ PRGI system initialized")
-    except Exception as e:
-        print("Initialization error:", e)
 
 def find_closest_title_match(input_title: str):
-    """
-    Compatibility function for existing app.py
-    Uses new hybrid similarity internally
-    """
-
-    best_score = 0
-    best_title = None
-    best_scores = {}
-
-    for title in PRGI_TITLES:
-        scores = calculate_similarity(input_title, title)
-        score = scores["hybrid"]
-
-        if score > best_score:
-            best_score = score
-            best_title = title
-            best_scores = scores
+    result = compare_title(input_title)
 
     return {
-        "match": {"title": best_title},
-        "scores": best_scores,
-        "rank_score": best_score
+        "match": {"title": result["closest_title"]},
+        "scores": {"hybrid": result["similarity"]},
+        "rank_score": result["similarity"]
     }
 
+
 def get_titles_from_database():
-    """
-    Compatibility function for app.py
-    Fetches titles from DB
-    """
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()

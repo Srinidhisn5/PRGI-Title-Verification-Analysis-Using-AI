@@ -528,5 +528,12 @@
   } else {
     init();
   }
+  const form = document.getElementById("submitForm");
+const button = document.getElementById("submitBtn");
 
+if (form && button) {
+    form.addEventListener("submit", function () {
+        button.innerText = "Submitting...";
+    });
+}
 })();

@@ -31,3 +31,6 @@ build/
 
 # Node (if used)
 node_modules/
+
+# Raw datasets (ignore)
+database/Registered Titles*

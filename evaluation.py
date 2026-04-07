@@ -1,139 +1,92 @@
-from similarity_engine import normalize_text, PRGI_TITLES, SBERT_MODEL
-from sklearn.metrics import f1_score
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.feature_extraction.text import TfidfVectorizer
-import jellyfish
-import random
+from similarity_engine import compare_title
+from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score
+import matplotlib.pyplot as plt
 
-# ------------------------
-# ENSURE DATA IS LOADED
-# ------------------------
-if not PRGI_TITLES:
-    from similarity_engine import load_prgi_data
-    load_prgi_data()
+# =========================
+# TEST DATASET (50+ cases recommended)
+# =========================
+test_cases = [
+    # SIMILAR
+    ("indian news daily", "similar"),
+    ("india news journal", "similar"),
+    ("laxmi times", "similar"),
+    ("sandhya halchal", "similar"),
+    ("bankura barta", "similar"),
+    ("daily india news", "similar"),
+    ("news india daily", "similar"),
+    ("bharat news", "similar"),
 
-# ------------------------
-# PHONETIC FUNCTION
-# ------------------------
-def phonetic_similarity(text1, text2):
-    words1 = text1.split()
-    words2 = text2.split()
+    # UNIQUE
+    ("random unique xyz", "unique"),
+    ("abcd qwerty zzzz", "unique"),
+    ("unknown publication name", "unique"),
+    ("zzzz random title", "unique"),
+    ("completely new brand name", "unique"),
+    ("no match publication", "unique"),
+]
 
-    matches = 0
-    total = min(len(words1), len(words2))
+# =========================
+# EVALUATION
+# =========================
+def evaluate():
 
-    for w1, w2 in zip(words1, words2):
-        if jellyfish.metaphone(w1) == jellyfish.metaphone(w2):
-            matches += 1
+    y_true = []
+    y_pred = []
 
-    return matches / total if total > 0 else 0
+    print("\n🔍 Running Full Evaluation...\n")
 
+    for text, expected in test_cases:
 
-# ------------------------
-# CREATE TEST DATA (REALISTIC)
-# ------------------------
-test_cases = []
+        result = compare_title(text)
+        score = result.get("similarity", 0)
 
-# ------------------------
-# POSITIVE CASES (NOISY VARIATIONS)
-# ------------------------
-for i in range(50):
-    t = PRGI_TITLES[i]
-    words = t.split()
+        # 🔥 Threshold (tuned)
+        if score >= 45:
+            predicted = "similar"
+        else:
+            predicted = "unique"
 
-    # remove random word
-    if len(words) > 3:
-        words.pop(random.randint(0, len(words) - 1))
+        y_true.append(1 if expected == "similar" else 0)
+        y_pred.append(1 if predicted == "similar" else 0)
 
-    # introduce small typo
-    if len(words) > 0:
-        words[0] = words[0][:max(1, len(words[0]) - 1)]
+        print(f"{text} → Score: {score:.2f} | Pred: {predicted} | Exp: {expected}")
 
-    modified = " ".join(words)
+    # =========================
+    # METRICS
+    # =========================
+    accuracy = sum([1 for i in range(len(y_true)) if y_true[i] == y_pred[i]]) / len(y_true)
 
-    test_cases.append((t, modified, 1))
+    precision = precision_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
 
+    cm = confusion_matrix(y_true, y_pred)
 
-# ------------------------
-# NEGATIVE CASES (HARD NEGATIVES)
-# ------------------------
-for i in range(50):
-    t1 = PRGI_TITLES[i]
-    t2 = PRGI_TITLES[i + 400]
+    print("\n==============================")
+    print(f"✅ Accuracy: {accuracy*100:.2f}%")
+    print(f"✅ Precision: {precision*100:.2f}%")
+    print(f"✅ Recall: {recall*100:.2f}%")
+    print(f"✅ F1 Score: {f1*100:.2f}%")
+    print("Confusion Matrix:")
+    print(cm)
+    print("==============================\n")
 
-    t1_words = t1.split()
-    t2_words = t2.split()
+    # =========================
+    # GRAPH
+    # =========================
+    labels = ["Accuracy", "Precision", "Recall", "F1"]
+    values = [accuracy*100, precision*100, recall*100, f1*100]
 
-    # mix words to confuse model
-    mixed = " ".join(t2_words[:2] + t1_words[-2:])
-
-    test_cases.append((t1, mixed, 0))
-
-
-# ------------------------
-# STORAGE
-# ------------------------
-y_true = []
-y_pred_phonetic = []
-y_pred_string = []
-y_pred_semantic = []
-y_pred_hybrid = []
-
-
-# ------------------------
-# EVALUATION LOOP
-# ------------------------
-for t1, t2, label in test_cases:
-
-    t1n = normalize_text(t1)
-    t2n = normalize_text(t2)
-
-    # ------------------
-    # PHONETIC
-    # ------------------
-    phonetic_sim = phonetic_similarity(t1n, t2n)
-    phonetic_score = 1 if phonetic_sim >= 0.8 else 0
-
-    # ------------------
-    # STRING (TF-IDF)
-    # ------------------
-    tfidf = TfidfVectorizer().fit_transform([t1n, t2n])
-    string_sim = cosine_similarity(tfidf[0:1], tfidf[1:2])[0][0]
-    string_score = 1 if string_sim >= 0.3 else 0
-
-    # ------------------
-    # SEMANTIC (SBERT)
-    # ------------------
-    emb1 = SBERT_MODEL.encode([t1n])
-    emb2 = SBERT_MODEL.encode([t2n])
-    semantic_sim = cosine_similarity(emb1, emb2)[0][0]
-    semantic_score = 1 if semantic_sim >= 0.8 else 0
-
-    # ------------------
-    # HYBRID
-    # ------------------
-    hybrid_sim = (
-        0.2 * phonetic_score +
-        0.3 * string_sim +
-        0.5 * semantic_sim
-    )
-    hybrid_score = 1 if hybrid_sim >= 0.55 else 0
-
-    # ------------------
-    # STORE RESULTS
-    # ------------------
-    y_true.append(label)
-    y_pred_phonetic.append(phonetic_score)
-    y_pred_string.append(string_score)
-    y_pred_semantic.append(semantic_score)
-    y_pred_hybrid.append(hybrid_score)
+    plt.figure()
+    plt.bar(labels, values)
+    plt.title("Model Performance Metrics")
+    plt.xlabel("Metrics")
+    plt.ylabel("Percentage")
+    plt.show()
 
 
-# ------------------------
-# FINAL RESULTS
-# ------------------------
-print("\n===== FINAL F1 SCORES =====")
-print("Phonetic :", round(f1_score(y_true, y_pred_phonetic), 2))
-print("String   :", round(f1_score(y_true, y_pred_string), 2))
-print("Semantic :", round(f1_score(y_true, y_pred_semantic), 2))
-print("Hybrid   :", round(f1_score(y_true, y_pred_hybrid), 2))
+# =========================
+# RUN
+# =========================
+if __name__ == "__main__":
+    evaluate()

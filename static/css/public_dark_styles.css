@@ -2,7 +2,7 @@
   width: 100px;
   height: 100px;
   border-radius: 50%;
-  background: conic-gradient(#22c55e 0deg, #1f2933 0deg);
+  background: conic-gradient(var(--ring-color, #22c55e) 0deg, #1f2933 0deg);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -20,9 +20,9 @@
 }
 
 #ringScore {
-  font-size: 18px;
-  font-weight: 700;
-  color: #22c55e;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
 }
 
 /* Global icon utilities */

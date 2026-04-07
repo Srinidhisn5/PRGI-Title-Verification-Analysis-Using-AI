@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Register</title>
+
+    <style>
+        body {
+            margin: 0;
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg,#0f172a,#020617);
+            color: #e5e7eb;
+        }
+
+        /* 🔥 Header */
+        .top-title {
+            text-align: center;
+            margin-top: 40px;
+            font-size: 22px;
+            font-weight: 700;
+            line-height: 1.4;
+        }
+
+        .top-title span {
+            display: block;
+            font-size: 14px;
+            color: #94a3b8;
+            font-weight: 500;
+        }
+
+        /* 🔥 Register box */
+        .register-container {
+            max-width: 420px;
+            margin: 60px auto;
+            background: #111827;
+            padding: 35px;
+            border-radius: 16px;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.7);
+            animation: fadeUp 0.5s ease;
+        }
+
+        .register-container h2 {
+            text-align: center;
+            margin-bottom: 25px;
+            color: #38bdf8;
+            font-weight: 800;
+        }
+
+        /* 🔥 Inputs */
+        .input-field {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 15px;
+            border-radius: 10px;
+            border: 1px solid #475569;
+            background: #020617;
+            color: white;
+            outline: none;
+            transition: 0.2s;
+        }
+
+        .input-field:focus {
+            border-color: #38bdf8;
+            box-shadow: 0 0 0 2px rgba(56,189,248,0.2);
+        }
+
+        /* 🔥 Button */
+        .register-btn {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #2563eb, #3b82f6);
+            border: none;
+            border-radius: 10px;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .register-btn:hover {
+            transform: translateY(-2px);
+            background: linear-gradient(135deg, #1d4ed8, #2563eb);
+        }
+
+        .register-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        /* 🔥 Login link */
+        .login-link {
+            text-align: center;
+            margin-top: 15px;
+        }
+
+        .login-link a {
+            color: #38bdf8;
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .login-link a:hover {
+            text-decoration: underline;
+        }
+
+        /* 🔥 Animation */
+        @keyframes fadeUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="top-title">
+    🇮🇳 Government of India
+    <span>Press Registrar General of India</span>
+</div>
+
+<div class="register-container">
+
+    <h2>📝 Create Account</h2>
+
+    <form method="POST" action="/user/register">
+
+        <input type="text" name="name" placeholder="Enter your name"
+               class="input-field" required>
+
+        <input type="email" name="email" placeholder="Enter your email"
+               class="input-field" required>
+
+        <input type="password" name="password" placeholder="Create password"
+               class="input-field" required>
+
+        <button type="submit" class="register-btn">
+            Register
+        </button>
+
+    </form>
+
+    <div class="login-link">
+        Already have an account?
+        <a href="/login_page">Login</a>
+    </div>
+
+</div>
+
+<!-- 🔥 Loading UX -->
+<script>
+document.querySelector("form").addEventListener("submit", function() {
+    const btn = this.querySelector("button");
+    btn.innerText = "Creating account...";
+    btn.disabled = true;
+});
+</script>
+
+</body>
+</html>
