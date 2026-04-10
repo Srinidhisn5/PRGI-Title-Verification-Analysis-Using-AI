@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PRGI Admin Login</title>
     <link rel="icon" href="{{ url_for('static', filename='assets/icons/favicon.ico') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='admin_styles.css') }}?v=4.0">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/admin_styles.css') }}?v=4.0">
     <style>
         /* Admin Login Specific Styles */
         * {
@@ -439,6 +439,7 @@
                     <span>🔐</span>
                     <span>Login to Admin Panel</span>
                 </button>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             </form>
 
             <div class="login-footer">

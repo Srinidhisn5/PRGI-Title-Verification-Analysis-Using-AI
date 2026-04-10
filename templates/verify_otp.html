@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Email Verification</title>
+
+<style>
+body {
+    margin: 0;
+    font-family: 'Inter', sans-serif;
+    background: linear-gradient(135deg,#0f172a,#020617);
+    color: #e5e7eb;
+}
+
+.container {
+    max-width: 420px;
+    margin: 80px auto;
+    background: #111827;
+    padding: 35px;
+    border-radius: 16px;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.7);
+}
+
+h2 {
+    text-align: center;
+    color: #38bdf8;
+}
+
+.subtitle {
+    text-align: center;
+    color: #94a3b8;
+    font-size: 14px;
+    margin-bottom: 20px;
+}
+
+.input-field {
+    width: 100%;
+    padding: 12px;
+    margin-bottom: 15px;
+    border-radius: 10px;
+    border: 1px solid #475569;
+    background: #020617;
+    color: white;
+    text-align: center;
+    letter-spacing: 3px;
+    font-size: 18px;
+}
+
+.verify-btn {
+    width: 100%;
+    padding: 12px;
+    background: #2563eb;
+    border: none;
+    border-radius: 10px;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.verify-btn:hover {
+    background: #1d4ed8;
+}
+
+.resend-btn {
+    width: 100%;
+    padding: 10px;
+    background: #374151;
+    border: none;
+    border-radius: 10px;
+    color: #e5e7eb;
+    margin-top: 10px;
+    cursor: pointer;
+}
+
+.resend-btn:disabled {
+    opacity: 0.5;
+}
+
+.timer {
+    text-align: center;
+    font-size: 13px;
+    color: #94a3b8;
+    margin-top: 5px;
+}
+
+.error {
+    color: #ef4444;
+    text-align: center;
+    margin-bottom: 10px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<h2>🔐 Verify OTP</h2>
+<p class="subtitle">Enter OTP sent to <b>{{ email }}</b></p>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+<form method="POST" action="/verify-otp">
+
+    <!-- ✅ CSRF FIX -->
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+    <input type="hidden" name="email" value="{{ email }}">
+
+    <input type="text" name="otp" placeholder="Enter 6-digit OTP"
+           class="input-field" required maxlength="6">
+
+    <button type="submit" class="verify-btn">
+        Verify OTP
+    </button>
+</form>
+
+<button id="resendOtpBtn" class="resend-btn">
+    🔁 Resend OTP
+</button>
+
+<p id="resendTimer" class="timer"></p>
+
+</div>
+
+<script>
+let cooldown = 30;
+let timer;
+
+const btn = document.getElementById("resendOtpBtn");
+const timerText = document.getElementById("resendTimer");
+
+// ✅ GET CSRF TOKEN FROM FORM
+const csrfToken = document.querySelector('input[name="csrf_token"]').value;
+
+function startTimer() {
+    btn.disabled = true;
+    cooldown = 30;
+
+    timerText.innerText = `Resend in ${cooldown}s`;
+
+    timer = setInterval(() => {
+        cooldown--;
+        timerText.innerText = `Resend in ${cooldown}s`;
+
+        if (cooldown <= 0) {
+            clearInterval(timer);
+            btn.disabled = false;
+            timerText.innerText = "";
+        }
+    }, 1000);
+}
+
+btn.addEventListener("click", async () => {
+
+    const email = document.querySelector("input[name='email']").value;
+
+    const res = await fetch("/resend-otp", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: `email=${encodeURIComponent(email)}&csrf_token=${csrfToken}`
+    });
+
+    const data = await res.json();
+
+    if (data.success) {
+        alert("OTP sent again!");
+        startTimer();
+    } else {
+        alert(data.error);
+    }
+});
+
+startTimer();
+</script>
+
+</body>
+</html>

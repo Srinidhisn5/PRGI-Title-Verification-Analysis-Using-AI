@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -81,6 +82,7 @@ body {
   padding: 20px;
   box-shadow: 0 20px 50px rgba(0,0,0,0.7);
   animation: fadeUp 0.5s ease;
+  overflow-x: auto;
 }
 
 /* Table */
@@ -102,21 +104,34 @@ th {
 
 tr {
   border-bottom: 1px solid #1f2937;
+  transition: all 0.2s ease;
 }
 
 tr:hover {
   background: rgba(255,255,255,0.04);
 }
 
-/* Status */
+/* 🔥 Status Badges */
+.status-badge {
+  padding: 5px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .status-approved {
   color: #22c55e;
-  font-weight: 700;
+  background: rgba(34,197,94,0.15);
 }
 
 .status-pending {
   color: #f59e0b;
-  font-weight: 700;
+  background: rgba(245,158,11,0.15);
+}
+
+.status-rejected {
+  color: #ef4444;
+  background: rgba(239,68,68,0.15);
 }
 
 /* Empty state */
@@ -139,13 +154,15 @@ tr:hover {
   }
 }
 </style>
+
 </head>
 
 <body>
 
 <!-- 🔥 Top Navbar -->
+
 <div class="top-bar">
-  <h2>📄 My Submissions</h2>
+  <h2>📄 My Submissions — {{ session.get('user_name') or 'User' }}</h2>
 
   <div class="top-actions">
     <a href="/submit_form" class="btn back-btn">⬅ Back</a>
@@ -154,6 +171,12 @@ tr:hover {
 </div>
 
 <div class="container">
+
+  <!-- 🔥 Count -->
+
+  <p style="color:#94a3b8; margin-bottom:10px;">
+    Total Submissions: {{ submissions|length }}
+  </p>
 
   <div class="table-container">
     <table>
@@ -166,37 +189,42 @@ tr:hover {
         </tr>
       </thead>
 
-      <tbody>
+```
+  <tbody>
 
-        {% if submissions|length == 0 %}
-        <tr>
-          <td colspan="4" class="empty-state">
-            📭 No submissions yet. Submit your first title!
-          </td>
-        </tr>
+    {% if submissions|length == 0 %}
+    <tr>
+      <td colspan="4" class="empty-state">
+        📭 No submissions yet. Submit your first title!
+      </td>
+    </tr>
+    {% endif %}
+
+    {% for sub in submissions %}
+    <tr>
+      <td>{{ sub.id }}</td>
+      <td><strong>{{ sub.title }}</strong></td>
+
+      <td>
+        {% if sub.status == "Approved" %}
+          <span class="status-badge status-approved">✔ Approved</span>
+        {% elif sub.status == "Rejected" %}
+          <span class="status-badge status-rejected">✖ Rejected</span>
+        {% else %}
+          <span class="status-badge status-pending">⏳ Pending</span>
         {% endif %}
+      </td>
 
-        {% for sub in submissions %}
-        <tr>
-          <td>{{ sub.id }}</td>
-          <td><strong>{{ sub.title }}</strong></td>
+      <td>
+        {{ sub.created_at[:10] }}
+      </td>
+    </tr>
+    {% endfor %}
 
-          <td>
-            {% if sub.status == "Approved" %}
-              <span class="status-approved">✔ Approved</span>
-            {% else %}
-              <span class="status-pending">⏳ Pending</span>
-            {% endif %}
-          </td>
+  </tbody>
+</table>
+```
 
-          <td>
-            {{ sub.created_at.split("T")[0] }}
-          </td>
-        </tr>
-        {% endfor %}
-
-      </tbody>
-    </table>
   </div>
 
 </div>

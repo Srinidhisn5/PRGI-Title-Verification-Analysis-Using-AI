@@ -1,44 +1,118 @@
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-BASE_DIR = os.path.dirname(__file__)
+
+# ✅ BASE PATH FIX
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'database', 'database.db')
+
 import logging
-from transformers import pipeline
-# load model once
-generator = pipeline(
-    "text-generation",
-    model="distilgpt2",
-    device=-1
-)
+
+# ✅ FIREBASE SETUP (FINAL WORKING)
+import firebase_admin
+from firebase_admin import credentials, auth
+
+cred_path = os.path.join(BASE_DIR, "firebase-key.json")
+
+if not firebase_admin._apps:
+    cred = credentials.Certificate(cred_path)
+    firebase_admin.initialize_app(cred)
+
+# ✅ FLASK IMPORTS (+ CSRF)
 from flask import Flask, render_template, request, redirect, url_for, g, jsonify, session, send_from_directory
+from flask_wtf.csrf import CSRFProtect
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
-import sqlite3
-from datetime import datetime, timezone, date
-from prgi_dataset import load_prgi_titles
-from similarity_engine import compare_title, initialize_prgi_system, find_closest_title_match, classify_risk, get_titles_from_database, normalize_text
 
-# Load PRGI titles at app startup
+# ✅ OTHER IMPORTS
+import time
+import random
+import smtplib
+from email.mime.text import MIMEText
+import difflib
+import sqlite3
+import secrets
+import re
+from datetime import datetime, timezone, date
+
+# ✅ YOUR MODULES
+from prgi_dataset import load_prgi_titles
+from similarity_engine import compare_title, initialize_system, normalize_text
+
+# ✅ LOAD DATASET
 PRGI_TITLES = load_prgi_titles()
 
+# ✅ INITIALIZE ONCE AT STARTUP
+initialize_system()
+
 app = Flask(__name__, static_folder='static', template_folder='templates')
-app.secret_key = os.environ.get("SECRET_KEY", "dev_key")
+
+# ✅ SECURE SECRET KEY (MANDATORY)
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
+if not app.secret_key:
+    raise RuntimeError("SECRET_KEY must be set in environment")
+
+# ✅ CSRF PROTECTION
+csrf = CSRFProtect(app)
+
+# ✅ HARDENED SESSION CONFIG
 app.config.update(
+    SESSION_COOKIE_NAME="prgi_session",
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax'
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=False,
+    PERMANENT_SESSION_LIFETIME=3600
 )
 
 logging.basicConfig(level=logging.INFO)
 
 MAX_DAILY_USAGE = 5
+LOGIN_ATTEMPTS = {}
+from collections import OrderedDict
+
+class LimitedCache(OrderedDict):
+    def __init__(self, max_size=1000):
+        self.max_size = max_size
+        super().__init__()
+
+    def __setitem__(self, key, value):
+        if key in self:
+            del self[key]
+        elif len(self) >= self.max_size:
+            self.popitem(last=False)
+        super().__setitem__(key, value)
+
+SIM_CACHE = LimitedCache(max_size=1000)
+
+# ✅ ADD OTP SYSTEM HERE
+OTP_STORE = {}
+
+def generate_otp():
+    return str(random.randint(100000, 999999))
+
+def send_otp_email(to_email, otp):
+    sender = "srinidhisnnairy@gmail.com"
+    password = os.environ.get("EMAIL_PASSWORD")
+    if not password:
+        raise RuntimeError("EMAIL_PASSWORD not set in environment")
+
+    msg = MIMEText(f"Your OTP for PRGI verification is: {otp}")
+    msg['Subject'] = "PRGI Email Verification OTP"
+    msg['From'] = sender
+    msg['To'] = to_email
+
+    server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+    server.login(sender, password)
+    server.send_message(msg)
+    server.quit()
 
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        db = g._database = sqlite3.connect(DB_PATH)
+        db = g._database = sqlite3.connect(DB_PATH, check_same_thread=False)
         db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL;")
     return db
 
 def init_db():
@@ -62,15 +136,16 @@ def init_db():
 ''')
     # USERS TABLE
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
         email TEXT UNIQUE,
         password TEXT,
         trust_score INTEGER DEFAULT 50,
         usage_count INTEGER DEFAULT 0,
-        last_used_date TEXT
-        )
+        last_used_date TEXT,
+        email_verified INTEGER DEFAULT 0
+    )
     """)
     # Ensure a uniqueness constraint on registration_number via a unique index
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_registration_number ON submissions(registration_number)")
@@ -79,7 +154,14 @@ def init_db():
 
 # Admin Authentication Constants
 ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "prgi@123"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+if not ADMIN_PASSWORD:
+    raise RuntimeError("ADMIN_PASSWORD must be set")
+
+# ✅ HELPER: Check if user already logged in
+def already_logged_in():
+    """Check if user is already logged in"""
+    return session.get("user_id") is not None
 
 def admin_required(f):
     """Decorator to require admin authentication"""
@@ -108,59 +190,210 @@ def close_connection(exception):
 @app.errorhandler(500)
 def internal_error(e):
     logging.error("Internal server error", exc_info=e)
-    return render_template("error.html", message="Something went wrong"), 500
+    return "Something went wrong", 500
 
 @app.route('/')
 def index():
     # Friendly root redirect to the submit page
     return redirect(url_for('submit_form'))
 
+# ✅ PREVENT RELOGIN - Redirect already logged in users
 @app.route('/login_page')
 def login_page():
+    if already_logged_in():
+        return redirect(url_for('submit_form'))
     return render_template('login.html')
 
+# ✅ PROFESSIONAL LOGIN VALIDATION
 @app.route('/user/login', methods=['POST'])
 def user_login():
-    data = request.form
+    email = (request.form.get('email') or '').strip().lower()
+    password = request.form.get('password') or ''
+
+    if not email or not password:
+        return render_template("login.html", error="All fields required")
+
+    ip = request.remote_addr
+    LOGIN_ATTEMPTS[ip] = LOGIN_ATTEMPTS.get(ip, 0) + 1
+    if LOGIN_ATTEMPTS[ip] > 10:
+        return render_template("login.html", error="Too many attempts. Try later.")
 
     db = get_db()
     cur = db.cursor()
-
-    cur.execute("SELECT * FROM users WHERE email=?", (data['email'],))
+    cur.execute("SELECT * FROM users WHERE email=?", (email,))
     user = cur.fetchone()
 
-    if user and check_password_hash(user['password'], data['password']):
-        session['user_id'] = user['id']
-        return redirect(url_for('submit_form'))
+    if not user:
+        return render_template("login.html", error="Account not found. Please register first.")
 
-    return render_template("login.html", error="Invalid email or password")
+    if user['email_verified'] == 0:
+        return render_template("login.html", error="Please verify your email first")
+    # ACCOUNT TYPE CHECK FIRST
+    if user['password'] == "GOOGLE_AUTH":
+        return render_template("login.html", error="This account uses Google login. Please use Google sign-in.")
 
+    # Then password check
+    if not check_password_hash(user['password'], password):
+        return render_template("login.html", error="Incorrect password. Please try again.")
+
+    # ✅ SUCCESS LOGIN with clean session
+    session.clear()
+    session['user_id'] = user['id']
+    session['user_name'] = user['name'] or "User"
+    session['auth_provider'] = 'email'
+    session.permanent = True
+    LOGIN_ATTEMPTS[ip] = 0
+    logging.info(f"User {user['id']} ({email}) logged in successfully")
+    return redirect(url_for('submit_form'))
+
+# ✅ PROFESSIONAL REGISTER VALIDATION
 @app.route('/user/register', methods=['POST'])
 def user_register():
-    data = request.form
+    name = (request.form.get('name') or '').strip()
+    email = (request.form.get('email') or '').strip().lower()
+    password = request.form.get('password') or ''
+
+    if not name or not email or not password:
+        return render_template("register.html", error="All fields required")
+
+    if len(password) < 6:
+        return render_template("register.html", error="Password must be at least 6 characters")
 
     db = get_db()
     cur = db.cursor()
 
+    cur.execute("SELECT * FROM users WHERE email=?", (email,))
+    if cur.fetchone():
+        return render_template("register.html", error="Email already exists")
+    
+    otp = generate_otp()
+    OTP_STORE[email] = {
+        "otp": otp,
+        "name": name,
+        "password": generate_password_hash(password),
+        "time": time.time()
+    }
+
+    send_otp_email(email, otp)
+
+    return render_template("verify_otp.html", email=email)
+@app.route('/verify-otp', methods=['POST'])
+def verify_otp():
+    email = request.form.get('email')
+    otp = request.form.get('otp')
+
+    stored = OTP_STORE.get(email)
+
+    if not stored:
+        return render_template("verify_otp.html", email=email, error="Invalid OTP")
+
+    # expiry check
+    if time.time() - stored["time"] > 300:
+        return render_template("verify_otp.html", email=email, error="OTP expired")
+
+    # otp check
+    if stored["otp"] != otp:
+        return render_template("verify_otp.html", email=email, error="Wrong OTP")
+
+    db = get_db()
+    cur = db.cursor()
+
+    cur.execute("""
+        INSERT INTO users (name, email, password, email_verified)
+        VALUES (?, ?, ?, 1)
+    """, (stored["name"], email, stored["password"]))
+
+    db.commit()
+
+    del OTP_STORE[email]
+
+    return redirect(url_for('login_page'))
+@app.route('/resend-otp', methods=['POST'])
+@csrf.exempt 
+def resend_otp():
+    email = request.form.get('email')
+
+    if not email:
+        return jsonify({"success": False, "error": "Email required"})
+
+    stored = OTP_STORE.get(email)
+
+    if not stored:
+        return jsonify({"success": False, "error": "Session expired. Register again."})
+
+    # ⏱ cooldown check (30 sec)
+    if time.time() - stored["time"] < 30:
+        return jsonify({"success": False, "error": "Please wait before requesting again"})
+
+    # 🔁 generate new OTP
+    new_otp = generate_otp()
+
+    OTP_STORE[email]["otp"] = new_otp
+    OTP_STORE[email]["time"] = time.time()
+
     try:
-        hashed_password = generate_password_hash(data['password'])
+        send_otp_email(email, new_otp)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
 
-        cur.execute("""
-        INSERT INTO users (name, email, password)
-        VALUES (?, ?, ?)
-        """, (data['name'], data['email'], hashed_password))
+# ✅ FIX GOOGLE LOGIN (PREVENTS MIXING, CLEAN SESSION)
+@app.route('/firebase-login', methods=['POST'])
+@csrf.exempt
+def firebase_login():
+    try:
+        data = request.get_json() or {}
+        id_token = data.get('token')
 
-        db.commit()
-        return redirect(url_for('login_page'))
+        if not id_token:
+            return jsonify({"success": False}), 400
 
-    except sqlite3.IntegrityError:
-        return "Email already exists. Try another."
+        decoded_token = auth.verify_id_token(id_token)
+
+        email = decoded_token.get('email')
+        if not email:
+            return jsonify({"success": False, "error": "Invalid email"}), 400
+        if not decoded_token.get('email_verified'):
+            return jsonify({"success": False, "error": "Email not verified"}), 401
+
+        name = decoded_token.get('name', 'Google User')
+
+        db = get_db()
+        cur = db.cursor()
+
+        cur.execute("SELECT * FROM users WHERE email=?", (email,))
+        user = cur.fetchone()
+
+        
+            # ✅ ACCOUNT CONSISTENCY CHECK - Prevent mixing login types
+        if user:
+                user_id = user["id"]
+        else:
+            cur.execute("""
+            INSERT INTO users (name, email, password)
+            VALUES (?, ?, ?)
+            """, (name, email, "GOOGLE_AUTH"))
+            db.commit()
+            user_id = cur.lastrowid
+
+        # ✅ CLEAN SESSION BEFORE LOGIN (important for security)
+        session.clear()
+
+        session['user_id'] = user_id
+        session['user_name'] = name
+        session['auth_provider'] = 'google'
+        session.permanent = True
+
+        logging.info(f"User {user_id} ({email}) logged in via Google")
+        return jsonify({"success": True})
+
+    except Exception as e:
+        logging.error(f"Firebase login error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 401
 
 @app.route('/my_submissions')
+@login_required
 def my_submissions():
-    if not session.get('user_id'):
-        return redirect(url_for('login_page'))
-
     user_id = session.get('user_id')
 
     db = get_db()
@@ -175,13 +408,18 @@ def my_submissions():
 
     return render_template('my_submissions.html', submissions=submissions)
 
+# ✅ PREVENT RELOGIN - Redirect already logged in users
 @app.route('/register_page')
 def register_page():
+    if already_logged_in():
+        return redirect(url_for('submit_form'))
     return render_template('register.html')
 
+# ✅ SECURE LOGOUT
 @app.route('/logout')
 def logout():
-    session.pop('user_id', None)
+    session.clear()
+    logging.info("User logged out")
     return redirect(url_for('login_page'))
 
 @app.route("/submit_form", methods=["GET", "POST"])
@@ -195,7 +433,7 @@ def submit_form():
         cur.execute("SELECT trust_score FROM users WHERE id=?", (session['user_id'],))
         user = cur.fetchone()
     if user:
-        trust_score = user['trust_score'] 
+        trust_score = user['trust_score']
 
     result = None
     error = None
@@ -204,14 +442,36 @@ def submit_form():
     if request.method == "POST":
         conn = get_db()
         cur = conn.cursor()
-        title = request.form.get("title", "").strip()
+        raw_title = request.form.get("title", "").strip()
         owner = request.form.get("owner", "").strip()
-        email = request.form.get("email", "").strip()
+
+        if not owner:
+            return render_template(
+                "submit_form.html",
+                error="Owner name is required",
+                form_data=form_data,
+                trust_score=trust_score
+            )
+        email = (request.form.get("email", "") or "").strip().lower()
         state = request.form.get("state", "").strip()
         language = request.form.get("language", "").strip()
         registration_number = request.form.get("registration_number", "").strip()
 
-        title = normalize_text(title)
+        if len(raw_title) > 150:
+            return render_template(
+                "submit_form.html",
+                error="Title too long (max 150 characters)",
+                form_data=form_data,
+                trust_score=trust_score
+            )
+        if not raw_title.strip():
+            return render_template(
+                "submit_form.html",
+                error="Title cannot be empty",
+                form_data=form_data,
+                trust_score=trust_score
+            )
+        title = normalize_text(raw_title)
         user_id = session.get('user_id')
 
         cur.execute("""
@@ -226,7 +486,9 @@ def submit_form():
 
         today = str(date.today())
 
-        usage_count = user['usage_count'] or 0
+        usage_count = user['usage_count']
+        if usage_count is None:
+            usage_count = 0
         last_used_date = user['last_used_date'] or ""
         trust_score = user['trust_score']
 
@@ -238,6 +500,8 @@ def submit_form():
             WHERE id = ?
             """, (today, user_id))
             conn.commit()
+
+        logging.info(f"User {user_id} usage count: {usage_count}")
 
         # LIMIT CHECK
         if usage_count >= MAX_DAILY_USAGE:
@@ -257,7 +521,7 @@ def submit_form():
             "registration_number": registration_number
         }
 
-        # 🔥 DUPLICATE CHECK (ADD HERE)
+        # 🔥 DUPLICATE CHECK
         cur.execute("""
         SELECT 1 FROM submissions 
         WHERE LOWER(TRIM(title)) = LOWER(TRIM(?)) AND user_id = ?
@@ -282,16 +546,48 @@ def submit_form():
 
         # Run similarity ALWAYS (do not block on validation) — compute against CSV PRGI dataset
         try:
-            similarity_analysis = compare_title(title, PRGI_TITLES)
-            similarity_score = round(float(similarity_analysis.get("similarity", 0.0)), 2)
-            similarity_label = similarity_analysis.get("risk", "Low")
-            risk_explanation = explain_risk(title, similarity_score)
+            cache_key = title.lower()
+
+            if cache_key in SIM_CACHE:
+                similarity_analysis = SIM_CACHE[cache_key]
+            else:
+                    similarity_analysis = compare_title(title)
+                    SIM_CACHE[cache_key] = similarity_analysis
+            best_match = similarity_analysis["top_matches"][0] if similarity_analysis["top_matches"] else None
+
+            breakdown = best_match[2] if best_match else {
+                        "semantic": 0,
+                        "tfidf": 0,
+                        "jaccard": 0,
+                        "phonetic": 0,
+                        "edit": 0,
+                        "structure": 0
+            }
+                    
+
+            similarity_score = similarity_analysis["similarity"]
+            similarity_label = similarity_analysis["risk"]
+            closest_title = similarity_analysis["closest_title"]
+            if not closest_title or similarity_score < 10:
+                closest_title = None
+
             similarity_result = {
                 "similarity": similarity_score,
                 "risk": similarity_label,
-                "closest_title": similarity_analysis.get('closest_title'),
-                "risk_explanation": risk_explanation,
-                "analysis_status": "success" if similarity_score > 0 else "failed"
+                "closest_title": closest_title,
+                "top_matches": similarity_analysis["top_matches"],
+                "confidence": similarity_score,
+                "risk_explanation": explain_risk(title, similarity_score),
+                "analysis_status": "success"
+            }
+            result = {
+                    "similarity_score": similarity_score,
+                    "similarity_label": similarity_label,
+                    "closest_title": closest_title,
+                    "explanation": similarity_result["risk_explanation"],
+                    "confidence": similarity_score,
+                    "top_matches": similarity_result["top_matches"],
+                    "breakdown": breakdown
             }
         except Exception as e:
             similarity_score, similarity_label = 0.0, 'Low'
@@ -300,14 +596,19 @@ def submit_form():
                 "risk": 'Low',
                 "closest_title": None,
                 "analysis_status": "failed",
-                "error": str(e)
-            }
+                "error": str(e),
 
-        result = {
-            "similarity_score": similarity_score,
-            "similarity_label": similarity_label,
-            "closest_title": similarity_result.get("closest_title", "")
-        }
+                # 🔥 ADD THESE ALSO HERE
+                "top_matches": [],
+                "confidence": 0
+            }
+            result = {
+                "similarity_score": similarity_score,
+                "similarity_label": similarity_label,
+                "closest_title": similarity_result.get("closest_title", ""),
+                "explanation": similarity_result.get("risk_explanation", ""),
+                "confidence": similarity_score
+            }
 
         # Validation: if missing fields -> show error but include AI result
         if not all(form_data.values()):
@@ -320,9 +621,8 @@ def submit_form():
                 trust_score=trust_score
             )
 
-        # Server-side email validation (simple format check)
-        import re
-        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        # Server-side email validation (stronger)
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email) or len(email) > 100:
             error = "Please provide a valid email address."
             return render_template(
                 "submit_form.html",
@@ -348,7 +648,7 @@ def submit_form():
             )
 
         # Block HIGH risk submissions (server-side enforcement)
-        if similarity_label == 'High':
+        if similarity_score >= 70:
             error = "This title appears to be HIGH RISK and cannot be submitted. Please modify the title or contact support."
             return render_template(
                 "submit_form.html",
@@ -379,10 +679,14 @@ def submit_form():
             today = str(date.today())
             usage_count += 1
 
-            if similarity_score < 30:
-                trust_score += 2
-            elif similarity_score > 70:
-                trust_score -= 3
+            if similarity_score < 25:
+                trust_score += 3
+            elif similarity_score < 50:
+                trust_score += 1
+            elif similarity_score > 75:
+                trust_score -= 4
+            elif similarity_score > 60:
+                trust_score -= 2
 
             trust_score = max(0, min(100, trust_score))
 
@@ -393,7 +697,7 @@ def submit_form():
 
             conn.commit()
 
-            logging.info(f"User {user_id} submitted title: {title}")
+            logging.info(f"User {user_id} submitted title: {title} | Similarity: {similarity_score}%")
 
         except sqlite3.IntegrityError:
             error = "Registration number already exists."
@@ -569,6 +873,7 @@ def dashboard():
 
 # REAL-TIME DASHBOARD STATS API
 @app.route("/api/dashboard_stats")
+@csrf.exempt
 def api_dashboard_stats():
 
     db = get_db()
@@ -681,7 +986,6 @@ def get_common_words(titles):
     if not titles:
         return []
 
-    import re
     from collections import Counter
 
     # Simple word extraction (could be enhanced with NLP)
@@ -724,12 +1028,12 @@ def explain_risk(title, similarity):
     keywords_found = [w for w in common_keywords if w in title]
 
     # risk explanation aligned with meter thresholds
-    if similarity >= 60:
+    if similarity >= 65:
         if keywords_found:
             return f"High risk: The title is very similar to existing PRGI publications and contains common keywords like {', '.join(keywords_found)}."
         return "High risk: The title is very similar to existing PRGI publications and may cause a registration conflict."
 
-    elif similarity >= 25:
+    elif similarity >= 30:
         if keywords_found:
             return f"Medium risk: The title has moderate similarity and contains common publication keywords like {', '.join(keywords_found)}."
         return "Medium risk: The title has moderate similarity with existing publication titles."
@@ -787,106 +1091,6 @@ def ai_recommendation(similarity, fake_flag):
 
     return "Review"
 
-def get_similar_prgi_titles(input_title):
-    """
-    Fetch top 5 similar PRGI titles from FULL PRGI dataset with similarity scores.
-
-    Returns list of dicts: [{"title": "Title", "similarity": 61}, ...]
-    """
-    try:
-        # Import required modules
-        from similarity_engine import SBERT_MODEL, PRGI_EMBEDDINGS, PRGI_TITLES
-        from sklearn.metrics.pairwise import cosine_similarity
-        import numpy as np
-
-        # Ensure system is initialized
-        if SBERT_MODEL is None or PRGI_EMBEDDINGS is None or PRGI_TITLES is None:
-            return []
-
-        # 🔥 DEBUGGING LOG: Show total PRGI titles available
-            
-        # Generate embedding for input title
-        input_embedding = SBERT_MODEL.encode([input_title])
-
-        # Compute similarities against ALL PRGI titles
-        similarities = cosine_similarity(input_embedding, PRGI_EMBEDDINGS)[0]
-
-        # Create list of (similarity_score, title_index) tuples
-        title_similarities = []
-        for idx, sim in enumerate(similarities):
-            similarity_percent = round(float(sim) * 100, 2)
-            title_similarities.append((similarity_percent, idx))
-
-        # Sort by similarity (descending - highest similarity first)
-        title_similarities.sort(key=lambda x: x[0], reverse=True)
-
-        # ALWAYS select at least ONE closest match (minimum requirement)
-        similar_titles = []
-        input_normalized = input_title.lower().strip()
-
-        # Find the closest match first (minimum requirement)
-        closest_found = False
-        for sim_score, idx in title_similarities:
-            prgi_title = PRGI_TITLES[idx]
-            prgi_normalized = prgi_title.lower().strip()
-
-            # Skip exact matches
-            if input_normalized == prgi_normalized:
-                continue
-
-            # Always add the first non-exact match as closest
-            if not closest_found:
-                similar_titles.append({
-                    "title": prgi_title,
-                    "similarity": sim_score
-                })
-                # 🔥 DEBUGGING LOG: Show closest title
-                closest_found = True
-                # If we only need one, we can break here, but continue for top 5
-                if len(similar_titles) >= 1:
-                    break
-
-        # If no closest match found (shouldn't happen with non-empty dataset),
-        # take the first title as fallback
-        if not closest_found and len(title_similarities) > 0:
-            fallback_idx = title_similarities[0][1]
-            fallback_title = PRGI_TITLES[fallback_idx]
-            fallback_score = title_similarities[0][0]
-            similar_titles.append({
-                "title": fallback_title,
-                "similarity": fallback_score
-            })
-
-        # Continue to find up to 5 similar titles (optional enhancement)
-        if len(similar_titles) < 5:
-            for sim_score, idx in title_similarities:
-                prgi_title = PRGI_TITLES[idx]
-                prgi_normalized = prgi_title.lower().strip()
-
-                # Skip exact matches and already added titles
-                if input_normalized == prgi_normalized:
-                    continue
-
-                # Check if already added
-                if any(item['title'] == prgi_title for item in similar_titles):
-                    continue
-
-                similar_titles.append({
-                    "title": prgi_title,
-                    "similarity": sim_score
-                })
-
-                if len(similar_titles) >= 5:
-                    break
-
-        print(f"DATABASE FETCH: Found {len(similar_titles)} similar titles from PRGI dataset")
-        return similar_titles
-
-    except Exception as e:
-        print(f"DATABASE FETCH ERROR: {e}")
-        return []
-
-# Admin Routes
 @app.route('/admin')
 def admin_redirect():
     """Redirect /admin to login if not authenticated"""
@@ -904,7 +1108,9 @@ def admin_login():
 
         if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
             session['admin_logged_in'] = True
+            session['admin_user'] = ADMIN_USERNAME
             session.permanent = True
+            logging.info(f"Admin {username} logged in")
             return redirect(url_for('admin_dashboard'))
         else:
             error = "Invalid credentials. Please try again."
@@ -914,7 +1120,8 @@ def admin_login():
 @app.route('/admin/logout')
 def admin_logout():
     """Admin logout - clear session"""
-    session.pop('admin_logged_in', None)
+    session.clear()
+    logging.info("Admin logged out")
     return redirect(url_for('admin_login'))
 
 @app.route('/admin/dashboard')
@@ -942,7 +1149,6 @@ def admin_dashboard():
     # Build dynamic query with parameterization
     query = 'SELECT * FROM submissions WHERE 1=1'
     params = []
-    # case-insensitive conditions; ignore blank values
     if status:
         query += ' AND LOWER(status) = LOWER(?)'
         params.append(status.strip())
@@ -953,19 +1159,16 @@ def admin_dashboard():
         query += ' AND LOWER(language) = LOWER(?)'
         params.append(language.strip())
 
-    query += ' ORDER BY id DESC'  # newest first
+    query += ' ORDER BY id DESC'
     cur.execute(query, tuple(params))
     rows = cur.fetchall()
 
     submissions = []
 
     for row in rows:
-
         similarity = row["similarity_score"] or 0
-
         fake_reasons = detect_fake_title(row["title"])
         fake_flag = len(fake_reasons) > 0
-
         recommendation = ai_recommendation(similarity, fake_flag)
 
         row_dict = dict(row)
@@ -997,7 +1200,6 @@ def export_approved():
         import io, csv
         output = io.StringIO()
         writer = csv.writer(output)
-        # Header (exact order)
         writer.writerow(['Title', 'Owner', 'State', 'Language', 'Registration No', 'Similarity %', 'Risk'])
         for r in rows:
             writer.writerow([
@@ -1018,11 +1220,12 @@ def export_approved():
         resp.headers['Content-Disposition'] = 'attachment; filename=approved_titles.csv'
         return resp
     except Exception as e:
-        print('CSV export error:', e)
+        logging.error(f'CSV export error: {e}')
         return "Export failed", 500
 
 @app.route("/admin/update_status", methods=["POST"])
 @admin_required
+@csrf.exempt
 def update_status():
 
     data = request.get_json(force=True)
@@ -1037,7 +1240,6 @@ def update_status():
     else:
         return jsonify({"success": False, "error": "Invalid status"}), 400
 
-    # USE SAME DATABASE CONNECTION
     conn = get_db()
     cur = conn.cursor()
 
@@ -1051,43 +1253,65 @@ def update_status():
     if cur.rowcount == 0:
         return jsonify({"error": "id not found"}), 404
 
+    logging.info(f"Submission {submission_id} status updated to {status}")
     return jsonify({"success": True, "status": status})
 
-# API: check registration uniqueness (POST)
-# API: live similarity check (POST)
+# ✅ CHECK SIMILARITY API - CSRF EXEMPT FOR AJAX
 @app.route("/api/check_similarity", methods=["POST"])
+@csrf.exempt
 def check_similarity():
-    data = request.get_json()
-    title = data.get("title", "").strip()
+    data = request.get_json(silent=True) or {}
+
+    title = normalize_text((data.get("title") or "").strip())
 
     if len(title) < 4:
         return jsonify({
-        "similarity": 0,
-        "risk": "Low",
-        "closest_title": None,
-        "explanation": "Title is too short to analyze. Please enter a longer publication title."
-    })
-    result = compare_title(title, PRGI_TITLES)
+            "similarity": 0,
+            "risk": "Low",
+            "closest_title": None,
+            "top_matches": [],
+            "confidence": 0,
+            "explanation": "Title too short"
+        })
 
-    similarity = result.get("similarity", 0)
-    risk = result.get("risk", "Low")
-    closest_title = result.get("closest_title")
+    try:
+        result = compare_title(title)
 
-    # generate explanation
-    risk_explanation = explain_risk(title, similarity)
-    fake_reasons = detect_fake_title(title)
+        similarity = float(result.get("similarity", 0))
+        risk = result.get("risk", "Low")
+        closest_title = result.get("closest_title")
 
-    return jsonify({
-        "similarity": similarity,
-        "risk": risk,
-        "closest_title": closest_title,
-        "explanation": risk_explanation,
-        "fake_warning": len(fake_reasons) > 0,
-        "fake_reasons": fake_reasons
-    })
+        # ✅ ENSURE closest_title is None if no match
+        if closest_title == "No strong match found":
+            closest_title = None
 
-# API: check registration uniqueness (POST)
+        return jsonify({
+            "similarity": similarity,
+            "risk": risk,
+            "closest_title": closest_title,
+
+            # 🔥 MOST IMPORTANT
+            "top_matches": result.get("top_matches", []),
+            "confidence": similarity,
+
+            # OPTIONAL BUT GOOD
+            "explanation": explain_risk(title, similarity),
+            "fake_reasons": detect_fake_title(title)
+        })
+
+    except Exception as e:
+        logging.error(f"Similarity API error: {e}")
+        return jsonify({
+            "similarity": 0,
+            "risk": "Low",
+            "closest_title": None,
+            "top_matches": [],
+            "confidence": 0,
+            "explanation": "Analysis failed"
+        })
+
 @app.route('/api/check_registration', methods=['POST'])
+@csrf.exempt
 def api_check_registration():
     data = request.get_json() or request.form
     reg = (data.get('registration_number') or '').strip()
@@ -1099,136 +1323,9 @@ def api_check_registration():
         exists = bool(cur.fetchone())
     return jsonify({"exists": exists})
 
-@app.route('/generate_ai_titles', methods=['POST'])
-def generate_ai_titles():
-    import re
-    import random
-
-    data = request.get_json()
-    title = data.get("title", "").strip()
-
-    if not title:
-        return jsonify([])
-
-    try:
-        # Clean input
-        words = re.findall(r"[a-zA-Z]+", title)
-        if not words:
-            return jsonify([])
-
-        base_word = words[0].title()
-
-        # Strong publication words
-        prefixes = ["National", "Bharat", "India", "Public", "Regional"]
-        suffixes = ["Chronicle", "Gazette", "Bulletin", "Journal", "Review"]
-
-        # Generate structured titles (HIGH QUALITY)
-        structured_titles = []
-        for i in range(5):
-            p = random.choice(prefixes)
-            s = random.choice(suffixes)
-            structured_titles.append(f"{p} {base_word} {s}")
-
-        # OPTIONAL: AI variation (adds intelligence)
-        prompt = f"Generate 3 professional newspaper titles based on: {title}"
-
-        ai_results = generator(
-            prompt,
-            max_length=40,
-            num_return_sequences=3,
-            do_sample=True,
-            temperature=0.7,
-            truncation=True,
-            pad_token_id=50256
-        )
-
-        ai_titles = []
-        for r in ai_results:
-            text = r['generated_text']
-            text = text.replace(prompt, "").strip()
-
-            text = re.sub(r"[^a-zA-Z\s]", "", text)
-            text = " ".join(text.split())
-
-            words = text.split()
-            if len(words) >= 2:
-                clean = " ".join(words[:4]).title()
-                ai_titles.append(clean)
-
-        # Combine both (BEST RESULT)
-        final_titles = list(set(structured_titles + ai_titles))
-
-        # Ensure 5 titles
-        return jsonify([{"title": t} for t in final_titles[:5]])
-
-    except Exception as e:
-        print("AI error:", e)
-
-        fallback = [
-            {"title": f"National {title} Chronicle"},
-            {"title": f"{title} Gazette"},
-            {"title": f"Public {title} Review"},
-            {"title": f"Regional {title} Bulletin"},
-            {"title": f"Independent {title} Journal"}
-        ]
-        return jsonify(fallback)
-
-@app.route('/api/suggest_titles', methods=['GET'])
-def api_suggest_titles():
-    """Generate AI suggested titles with low similarity scores"""
-    title = request.args.get('title', '').strip()
-
-    if not title:
-        return jsonify({
-            "status": "success",
-            "suggestions": []
-        })
-
-    try:
-        # Ensure PRGI system is initialized
-        initialize_prgi_system()
-
-        # Import required modules
-        from similarity_engine import SBERT_MODEL, PRGI_EMBEDDINGS, PRGI_TITLES
-        from sklearn.metrics.pairwise import cosine_similarity
-        import numpy as np
-
-        # Generate embedding for input title
-        input_embedding = SBERT_MODEL.encode([title])
-
-        # Compute similarities against ALL PRGI titles
-        similarities = cosine_similarity(input_embedding, PRGI_EMBEDDINGS)[0]
-
-        # Create list of (similarity_score, title_index) tuples
-        title_similarities = []
-        for idx, sim in enumerate(similarities):
-            similarity_percent = round(float(sim) * 100, 2)
-            title_similarities.append((similarity_percent, idx))
-
-        # Sort by similarity (ascending - lowest similarity first)
-        title_similarities.sort(key=lambda x: x[0])
-
-        # Select titles where similarity < 30%, pick TOP 5 lowest similarity titles
-        suggestions = []
-        for sim_score, idx in title_similarities:
-            if sim_score < 30 and len(suggestions) < 5:
-                suggestions.append(PRGI_TITLES[idx])
-            elif len(suggestions) >= 5:
-                break
-
-        return jsonify({
-            "status": "success",
-            "suggestions": suggestions
-        })
-
-    except Exception as e:
-        print(f"Error in suggest_titles: {e}")
-        return jsonify({
-            "status": "failed",
-            "suggestions": []
-        })
-
+# ✅ GENERATE PRGI TITLES API - CSRF EXEMPT FOR AJAX
 @app.route('/api/generate_prgi_titles', methods=['POST'])
+@csrf.exempt
 def api_generate_prgi_titles():
     """
     Generate EXACTLY 5 alternative publication titles following strict PRGI rules.
@@ -1252,26 +1349,27 @@ def api_generate_prgi_titles():
         if not user_title or not prgi_match_title:
             return "Error: user_title and prgi_match_title are required", 400
 
-        # Generate alternative titles using the strict PRGI rules
         alternative_titles = generate_prgi_alternative_titles(
             user_title,
             prgi_match_title,
             similarity_percent
         )
 
-        # Return exactly 5 lines, one title per line, nothing else
         response_text = '\n'.join(alternative_titles[:5])
 
-        # Ensure we have exactly 5 lines
         lines = response_text.split('\n')
-        while len(lines) < 5:
-            lines.append(f"Alternative Publication {len(lines) + 1}")
+        if len(lines) < 5:
+            extra = generate_fallback_suggestions(user_title)
+            for item in extra:
+                if item["title"] not in lines:
+                    lines.append(item["title"])
+                if len(lines) >= 5:
+                    break
 
         return '\n'.join(lines[:5]), 200, {'Content-Type': 'text/plain'}
 
     except Exception as e:
-        print(f"Error in generate_prgi_titles: {e}")
-        # Return fallback titles if error occurs
+        logging.error(f"Error in generate_prgi_titles: {e}")
         fallback_titles = [
             "Regional Publication Review",
             "State Bulletin Gazette",
@@ -1281,159 +1379,53 @@ def api_generate_prgi_titles():
         ]
         return '\n'.join(fallback_titles), 200, {'Content-Type': 'text/plain'}
 
+def validate_ai_titles(titles):
+
+    final = []
+
+    for t in titles:
+        analysis = compare_title(t)
+
+        similarity = analysis.get("similarity", 0)
+        risk = analysis.get("risk", "Low")
+        fake_flags = detect_fake_title(t)
+
+        if similarity < 30 and risk == "Low" and not fake_flags:
+            final.append(t)
+
+    return final[:5]
+
 def generate_fallback_suggestions(title):
     """Generate rule-based suggestions if SBERT fails"""
-    import re
     from random import choice
 
-    # Simple rule-based alternatives
     prefixes = ['The', 'National', 'Regional', 'Local', 'Community', 'Weekly', 'Monthly']
     suffixes = ['Review', 'Bulletin', 'Journal', 'Chronicle', 'Herald', 'Digest', 'Gazette']
     modifiers = ['India', 'Indian', 'Weekly', 'Journal', 'Review', 'News', 'Publication']
 
     suggestions = []
 
-    # Add prefixes
-    for prefix in choice(prefixes, 3):
-        suggestions.append(f"{prefix} {title}")
+    for i in range(3):
+        if i < len(prefixes):
+            suggestions.append(f"{prefixes[i]} {title}")
 
-    # Add suffixes
-    for suffix in choice(suffixes, 3):
-        suggestions.append(f"{title} {suffix}")
+    for i in range(3):
+        if i < len(suffixes):
+            suggestions.append(f"{title} {suffixes[i]}")
 
-    # Replace common words
     common_words = ['news', 'daily', 'bulletin', 'digest', 'weekly', 'monthly']
     for word in common_words:
         if word in title.lower():
             new_title = title.lower().replace(word, choice(modifiers)).title()
             suggestions.append(new_title)
 
-    # Return with dummy similarity scores
     return [{
         "title": suggestion,
-        "similarity": round(30 + (i * 5), 1)  # 30-55% range
+        "similarity": round(30 + (i * 5), 1)
     } for i, suggestion in enumerate(suggestions[:6])]
-
-def generate_alternative_titles(original_title):
-    """Generate 5-7 alternative titles with lower similarity"""
-    import re
-    from collections import Counter
-
-    # Common high-risk words to avoid
-    high_risk_words = ['indian', 'monthly', 'digest', 'daily', 'news', 'times', 'post', 'tribune']
-
-    # Extract keywords from original title
-    words = re.findall(r'\b[a-zA-Z]{3,}\b', original_title.lower())
-    word_freq = Counter(words)
-
-    # Get existing titles from database to avoid
-    db = get_db()
-    cur = db.cursor()
-    cur.execute('SELECT title FROM submissions WHERE title IS NOT NULL')
-    existing_titles = [row[0].lower() for row in cur.fetchall()]
-
-    alternatives = []
-
-    # Strategy 1: Change word order and structure
-    if len(words) >= 3:
-        # Reverse word order
-        reversed_title = ' '.join(words[::-1]).title()
-        alternatives.append({
-            'title': reversed_title,
-            'strategy': 'Word order reversal'
-        })
-
-        # Move last word to front
-        if len(words) >= 2:
-            moved_title = words[-1].title() + ' ' + ' '.join(words[:-1]).title()
-            alternatives.append({
-                'title': moved_title,
-                'strategy': 'Last word first'
-            })
-
-    # Strategy 2: Use broader descriptors
-    descriptor_map = {
-        'indian': ['national', 'countrywide', 'subcontinental'],
-        'monthly': ['periodic', 'regular', 'scheduled'],
-        'digest': ['review', 'summary', 'overview'],
-        'news': ['bulletin', 'report', 'updates'],
-        'daily': ['regular', 'frequent', 'ongoing']
-    }
-
-    for word, alternatives_list in descriptor_map.items():
-        if word in original_title.lower():
-            for alt_word in alternatives_list[:2]:  # Use first 2 alternatives
-                new_title = original_title.lower().replace(word, alt_word).title()
-                alternatives.append({
-                    'title': new_title,
-                    'strategy': f'Replace "{word}" with "{alt_word}"'
-                })
-
-    # Strategy 3: Add descriptive prefixes/suffixes
-    prefixes = ['The', 'National', 'Regional', 'Local', 'Community']
-    suffixes = ['Review', 'Bulletin', 'Journal', 'Chronicle', 'Herald']
-
-    for prefix in prefixes[:3]:
-        new_title = f"{prefix} {original_title}"
-        alternatives.append({
-            'title': new_title,
-            'strategy': f'Add prefix: "{prefix}"'
-        })
-
-    for suffix in suffixes[:3]:
-        new_title = f"{original_title} {suffix}"
-        alternatives.append({
-            'title': new_title,
-            'strategy': f'Add suffix: "{suffix}"'
-        })
-
-    # Strategy 4: Use abstract/conceptual alternatives
-    conceptual_map = {
-        'indian': ['subcontinental', 'south asian', 'bharatiya'],
-        'monthly': ['periodic', 'scheduled', 'regular'],
-        'digest': ['compendium', 'anthology', 'collection']
-    }
-
-    for word, conceptual_alternatives in conceptual_map.items():
-        if word in original_title.lower():
-            for alt in conceptual_alternatives:
-                new_title = original_title.lower().replace(word, alt).title()
-                alternatives.append({
-                    'title': new_title,
-                    'strategy': f'Conceptual replacement: "{alt}"'
-                })
-
-    # Remove duplicates and filter out titles too similar to original
-    seen = set()
-    unique_alternatives = []
-
-    for alt in alternatives:
-        title_lower = alt['title'].lower()
-        # Skip if too similar to original (same words in same order)
-        if title_lower == original_title.lower():
-            continue
-
-        # Skip if already seen
-        if title_lower in seen:
-            continue
-
-        # Skip if too similar to existing titles
-        too_similar = False
-        for existing in existing_titles:
-            if calculate_string_similarity(title_lower, existing) > 0.7:
-                too_similar = True
-                break
-
-        if not too_similar:
-            seen.add(title_lower)
-            unique_alternatives.append(alt)
-
-    # Return top 5-7 alternatives
-    return unique_alternatives[:7]
 
 def calculate_string_similarity(s1, s2):
     """Calculate similarity between two strings (0.0 to 1.0)"""
-    # Simple word overlap similarity
     words1 = set(s1.split())
     words2 = set(s2.split())
 
@@ -1448,191 +1440,111 @@ def calculate_string_similarity(s1, s2):
     return len(intersection) / len(union)
 
 def generate_prgi_alternative_titles(user_title, prgi_match_title, similarity_percent):
-    """
-    Generate EXACTLY 5 alternative publication titles following strict PRGI rules.
-
-    CRITICAL RULES:
-    - Every title MUST be about the SAME SUBJECT as user_title (same topic, domain, audience)
-    - Different wording and sentence structure from both user_title and prgi_match_title
-    - Avoid overlapping phrases with prgi_match_title
-    - Semantically closer to user_title than to prgi_match_title
-    - Clearly less similar than prgi_match_title
-    - NO generic news titles, banking/law/finance unless user_title is about them
-    - NO marketing slogans, one-word titles, copied/modified PRGI titles
-    - Output: exactly 5 lines, one title per line, nothing else
-
-    Args:
-        user_title: Original user title
-        prgi_match_title: Closest PRGI title match
-        similarity_percent: Similarity percentage between user and PRGI title
-
-    Returns:
-        List of exactly 5 alternative titles
-    """
     import re
-    from collections import Counter
 
-    # Extract core subject matter from user title
-    user_words = re.findall(r'\b[a-zA-Z]{3,}\b', user_title.lower())
-    prgi_words = re.findall(r'\b[a-zA-Z]{3,}\b', prgi_match_title.lower())
+    # Extract meaningful words
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', user_title.lower())
 
-    # Find words unique to user title (avoid PRGI overlapping phrases)
-    user_unique_words = set(user_words) - set(prgi_words)
-    user_common_words = set(user_words) & set(prgi_words)
+    if not words:
+        return [
+            "General Technology Review",
+            "Digital Innovation Bulletin",
+            "Emerging Trends Chronicle",
+            "Future Developments Journal",
+            "Technology Insights Report"
+        ]
 
-    # Identify core subject keywords (non-generic publication terms)
-    publication_terms = {
-        'news', 'digest', 'bulletin', 'samachar', 'tak', 'aaj', 'ajj', 'hindustan',
-        'times', 'express', 'post', 'mail', 'darpan', 'mirror', 'sandesh', 'patrika',
-        'jagran', 'dainik', 'daily', 'weekly', 'monthly', 'fortnightly', 'quarterly',
-        'government', 'govt', 'public', 'national', 'india', 'indian', 'bharat',
-        'pradesh', 'rajasthan', 'uttar', 'pradesh', 'madhya', 'pradesh', 'maharashtra',
-        'gujarat', 'karnataka', 'tamil', 'nadu', 'andhra', 'pradesh', 'telangana',
-        'kerala', 'punjab', 'haryana', 'bihar', 'jharkhand', 'west', 'bengal'
+    # --- STEP 1: Detect theme ---
+    tech_map = {
+        "tech": "Technology",
+        "technology": "Technology",
+        "digital": "Digital",
+        "ai": "AI",
+        "data": "Data",
+        "innovation": "Innovation"
     }
 
-    # Extract core subject terms (non-publication generic terms)
-    core_subject = [word for word in user_unique_words if word not in publication_terms]
+    theme = None
+    for w in words:
+        if w in tech_map:
+            theme = tech_map[w]
+            break
 
-    # If no unique core terms, use common words but modify them
-    if not core_subject:
-        core_subject = list(user_common_words)[:3]  # Take first 3 common words
+    if not theme:
+        theme = words[0].title()
 
-    # Alternative descriptors (different from user title structure)
-    alternative_descriptors = {
-        'indian': ['regional', 'domestic', 'local', 'national', 'subcontinental'],
-        'monthly': ['periodic', 'regular', 'scheduled', 'quarterly', 'annual'],
-        'digest': ['review', 'summary', 'chronicle', 'journal', 'gazette'],
-        'news': ['bulletin', 'report', 'dispatch', 'chronicle', 'gazette'],
-        'daily': ['regular', 'frequent', 'ongoing', 'continuous', 'routine'],
-        'weekly': ['periodic', 'regular', 'recurring', 'scheduled', 'routine'],
-        'times': ['chronicle', 'gazette', 'bulletin', 'dispatch', 'review'],
-        'post': ['bulletin', 'dispatch', 'gazette', 'chronicle', 'review']
+    # --- STEP 2: Smart replacements ---
+    word_variations = {
+        "latest": ["emerging", "current", "modern"],
+        "updates": ["insights", "trends", "developments", "reports"],
+        "news": ["bulletin", "report", "chronicle"],
+        "tech": ["technology", "digital", "innovation"]
     }
 
-    # Generate exactly 5 alternative titles with different structures
-    alternatives = []
+    generated = []
 
-    # Strategy 1: Change core descriptor + keep subject
-    if len(core_subject) >= 1:
-        for desc, alts in alternative_descriptors.items():
-            if desc in user_title.lower():
-                for alt_desc in alts[:2]:  # Use 2 alternatives max per descriptor
-                    if len(alternatives) >= 5:
-                        break
-                    # Replace descriptor and add subject term
-                    new_title = user_title.lower().replace(desc, alt_desc).title()
-                    if core_subject:
-                        new_title = f"{new_title} {core_subject[0].title()}"
-                    alternatives.append(new_title)
-                break
+    for w in words:
+        if w in word_variations:
+            for alt in word_variations[w]:
+                new_words = [alt if x == w else x for x in words]
+                title = " ".join(new_words).title()
+                generated.append(title)
 
-    # Strategy 2: Add geographical prefix + modify structure
-    geographical_prefixes = ['Regional', 'State', 'District', 'City', 'Local']
-    if len(alternatives) < 5 and core_subject:
-        for prefix in geographical_prefixes[:3]:
-            if len(alternatives) >= 5:
-                break
-            # Create new structure: Prefix + Subject + Publication type
-            if len(core_subject) >= 2:
-                new_title = f"{prefix} {core_subject[0].title()} {core_subject[1].title()} Gazette"
-            else:
-                new_title = f"{prefix} {core_subject[0].title()} Bulletin"
-            alternatives.append(new_title)
-
-    # Strategy 3: Use conceptual alternatives + different word order
-    conceptual_alternatives = {
-        'indian': ['subcontinental', 'south asian', 'bharatiya', 'national'],
-        'monthly': ['quarterly', 'biannual', 'periodic', 'regular'],
-        'digest': ['compendium', 'anthology', 'collection', 'summary'],
-        'news': ['information', 'updates', 'reports', 'bulletins']
-    }
-
-    if len(alternatives) < 5:
-        for concept, alts in conceptual_alternatives.items():
-            if concept in user_title.lower():
-                for alt_concept in alts[:2]:
-                    if len(alternatives) >= 5:
-                        break
-                    # Create different sentence structure
-                    if len(core_subject) >= 1:
-                        new_title = f"{core_subject[0].title()} {alt_concept.title()} Review"
-                        alternatives.append(new_title)
-                break
-
-    # Strategy 4: Add thematic modifiers
-    thematic_modifiers = ['Community', 'Public', 'General', 'Official', 'Current']
-    if len(alternatives) < 5 and core_subject:
-        for modifier in thematic_modifiers[:3]:
-            if len(alternatives) >= 5:
-                break
-            # Create: Subject + Thematic + Publication
-            if len(core_subject) >= 2:
-                new_title = f"{core_subject[0].title()} {core_subject[1].title()} {modifier} Journal"
-            else:
-                new_title = f"{modifier} {core_subject[0].title()} Gazette"
-            alternatives.append(new_title)
-
-    # Strategy 5: Use abstract/conceptual terms + different structure
-    abstract_terms = ['Review', 'Bulletin', 'Chronicle', 'Gazette', 'Journal', 'Dispatch']
-    if len(alternatives) < 5 and core_subject:
-        for term in abstract_terms[:3]:
-            if len(alternatives) >= 5:
-                break
-            # Create: Conceptual + Subject + Type
-            new_title = f"Contemporary {core_subject[0].title()} {term}"
-            alternatives.append(new_title)
-
-    # Ensure exactly 5 titles (trim or add generic fallbacks if needed)
-    alternatives = alternatives[:5]
-
-    # Add generic fallbacks if we don't have enough specific alternatives
-    fallback_templates = [
-        f"Regional {core_subject[0].title() if core_subject else 'Publication'} Review",
-        f"Statewide {core_subject[0].title() if core_subject else 'Bulletin'} Gazette",
-        f"Local {core_subject[0].title() if core_subject else 'Journal'} Dispatch",
-        f"Community {core_subject[0].title() if core_subject else 'News'} Bulletin",
-        f"Public {core_subject[0].title() if core_subject else 'Information'} Chronicle"
+    # --- STEP 3: Strong structured titles (MAIN QUALITY FIX) ---
+    structured_titles = [
+        f"{theme} Innovation Bulletin",
+        f"{theme} Trends Chronicle",
+        f"Emerging {theme} Review",
+        f"{theme} Developments Journal",
+        f"Future {theme} Insights"
     ]
 
-    while len(alternatives) < 5:
-        for template in fallback_templates:
-            if len(alternatives) >= 5:
+    generated.extend(structured_titles)
+
+    # --- STEP 4: Clean & filter ---
+    cleaned = []
+    for t in generated:
+        t = t.strip()
+
+        # avoid very short / duplicate / ugly titles
+        if len(t.split()) < 2:
+            continue
+        if t not in cleaned:
+            cleaned.append(t)
+
+    # --- STEP 5: Ensure exactly 5 high-quality outputs ---
+    final = cleaned[:5]
+
+    # fallback safety (rare case)
+    if len(final) < 5:
+        fallback = [
+            f"{theme} Review",
+            f"{theme} Bulletin",
+            f"{theme} Chronicle",
+            f"{theme} Journal",
+            f"{theme} Insights"
+        ]
+        for f in fallback:
+            if f not in final:
+                final.append(f)
+            if len(final) >= 5:
                 break
-            if template not in alternatives:
-                alternatives.append(template)
 
-    # Final validation: ensure each title passes similarity checks
-    validated_titles = []
-    for title in alternatives[:5]:
-        # Check similarity to user title (should be reasonably close)
-        user_similarity = calculate_string_similarity(title.lower(), user_title.lower())
-
-        # Check similarity to PRGI match (must be lower than original similarity)
-        prgi_similarity = calculate_string_similarity(title.lower(), prgi_match_title.lower())
-
-        # Must be semantically closer to user title AND clearly less similar to PRGI match
-        if user_similarity > prgi_similarity and prgi_similarity < (similarity_percent / 100 * 0.8):
-            validated_titles.append(title)
-
-    # If validation failed, use original alternatives
-    if len(validated_titles) < 5:
-        validated_titles = alternatives[:5]
-
-    return validated_titles[:5]
-
+    return final[:5]
 if __name__ == '__main__':
-    # Initialize DB and SBERT model within application context
     with app.app_context():
         init_db()
         try:
-            # Initialize PRGI system with ONE-TIME pipeline
-            initialize_prgi_system()
-            print("PRGI system initialized successfully")
+            print("✅ PRGI system initialized successfully")
         except Exception as e:
-            print(f"CRITICAL ERROR: Failed to initialize PRGI system: {e}")
+            print(f"❌ CRITICAL ERROR: Failed to initialize PRGI system: {e}")
             raise
-    app.run(host='127.0.0.1', port=5000, debug=False)
+
+    # ✅ RUN APP (OUTSIDE try/except)
+    if os.environ.get("FLASK_ENV") == "development":
+        app.run(debug=True)
+    else:
+        app.run(host='127.0.0.1', port=5000, debug=False)
 
 # Favicon route (NON-NEGOTIABLE)
 @app.route('/favicon.ico')

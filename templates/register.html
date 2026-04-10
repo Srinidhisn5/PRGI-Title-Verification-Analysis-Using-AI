@@ -13,41 +13,45 @@
             color: #e5e7eb;
         }
 
-        /* 🔥 Header */
         .top-title {
             text-align: center;
             margin-top: 40px;
             font-size: 22px;
             font-weight: 700;
-            line-height: 1.4;
         }
 
         .top-title span {
             display: block;
             font-size: 14px;
             color: #94a3b8;
-            font-weight: 500;
         }
 
-        /* 🔥 Register box */
+        .subtitle {
+            text-align: center;
+            color: #94a3b8;
+            font-size: 12px;
+        }
+
         .register-container {
             max-width: 420px;
             margin: 60px auto;
             background: #111827;
             padding: 35px;
             border-radius: 16px;
-            box-shadow: 0 20px 50px rgba(0,0,0,0.7);
-            animation: fadeUp 0.5s ease;
         }
 
         .register-container h2 {
             text-align: center;
-            margin-bottom: 25px;
             color: #38bdf8;
-            font-weight: 800;
         }
 
-        /* 🔥 Inputs */
+        #registerError {
+            display: none;
+            color: #ef4444;
+            text-align: center;
+            margin-bottom: 10px;
+        }
+
         .input-field {
             width: 100%;
             padding: 12px;
@@ -56,64 +60,22 @@
             border: 1px solid #475569;
             background: #020617;
             color: white;
-            outline: none;
-            transition: 0.2s;
         }
 
-        .input-field:focus {
-            border-color: #38bdf8;
-            box-shadow: 0 0 0 2px rgba(56,189,248,0.2);
-        }
-
-        /* 🔥 Button */
         .register-btn {
             width: 100%;
             padding: 12px;
-            background: linear-gradient(135deg, #2563eb, #3b82f6);
+            background: #2563eb;
             border: none;
             border-radius: 10px;
             color: white;
             font-weight: bold;
             cursor: pointer;
-            transition: all 0.2s ease;
         }
 
-        .register-btn:hover {
-            transform: translateY(-2px);
-            background: linear-gradient(135deg, #1d4ed8, #2563eb);
-        }
-
-        .register-btn:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-        }
-
-        /* 🔥 Login link */
         .login-link {
             text-align: center;
             margin-top: 15px;
-        }
-
-        .login-link a {
-            color: #38bdf8;
-            text-decoration: none;
-            font-weight: 600;
-        }
-
-        .login-link a:hover {
-            text-decoration: underline;
-        }
-
-        /* 🔥 Animation */
-        @keyframes fadeUp {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
         }
     </style>
 </head>
@@ -125,20 +87,34 @@
     <span>Press Registrar General of India</span>
 </div>
 
+<p class="subtitle">Secure Registration Portal</p>
+
 <div class="register-container">
 
     <h2>📝 Create Account</h2>
 
-    <form method="POST" action="/user/register">
+    <div id="registerError"></div>
 
-        <input type="text" name="name" placeholder="Enter your name"
-               class="input-field" required>
+    <!-- ✅ SINGLE CLEAN FORM -->
+    <form method="POST" action="/user/register" id="registerForm">
 
-        <input type="email" name="email" placeholder="Enter your email"
-               class="input-field" required>
+        <!-- ✅ CSRF FIX -->
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
-        <input type="password" name="password" placeholder="Create password"
-               class="input-field" required>
+        <input type="text" name="name"
+               placeholder="Enter your name"
+               class="input-field"
+               required>
+
+        <input type="email" name="email"
+               placeholder="Enter your email"
+               class="input-field"
+               required>
+
+        <input type="password" name="password"
+               placeholder="Create password"
+               class="input-field"
+               required minlength="6">
 
         <button type="submit" class="register-btn">
             Register
@@ -153,10 +129,25 @@
 
 </div>
 
-<!-- 🔥 Loading UX -->
 <script>
-document.querySelector("form").addEventListener("submit", function() {
-    const btn = this.querySelector("button");
+const form = document.getElementById("registerForm");
+const errorBox = document.getElementById("registerError");
+
+form.addEventListener("submit", function(e) {
+
+    const emailInput = form.querySelector('input[name="email"]');
+    const passwordInput = form.querySelector('input[name="password"]');
+    const btn = form.querySelector("button");
+
+    emailInput.value = emailInput.value.toLowerCase().trim();
+
+    if (passwordInput.value.length < 6) {
+        e.preventDefault();
+        errorBox.style.display = "block";
+        errorBox.innerText = "Password must be at least 6 characters.";
+        return;
+    }
+
     btn.innerText = "Creating account...";
     btn.disabled = true;
 });

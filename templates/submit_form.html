@@ -153,6 +153,7 @@
       backdrop-filter: blur(14px);
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.05);
       transition: transform 0.25s ease, box-shadow 0.25s ease;
+      position: relative;
     }
 
     .left-panel:hover {
@@ -166,6 +167,16 @@
       margin-bottom: 1.5rem;
       padding-bottom: 1rem;
       border-bottom: 1px solid var(--border-color);
+    }
+
+    /* ===== FORM OVERLAY ===== */
+    #formOverlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.6);
+      z-index: 10;
+      border-radius: 16px;
+      backdrop-filter: blur(4px);
     }
 
     /* ===== FORM ELEMENTS ===== */
@@ -471,14 +482,6 @@
       font-weight: 600;
     }
 
-    .result-box {
-      background: #1e293b;
-      padding: 16px;
-      border-radius: 12px;
-      margin-top: 20px;
-      border: 1px solid #334155;
-    }
-
     /* ===== NAVIGATION BUTTONS ===== */
     .submissions-btn {
       z-index: 9999;
@@ -674,6 +677,7 @@
         grid-template-columns: 1fr;
       }
     }
+
     /* ===== TOP BAR ===== */
     .top-bar {
       position: fixed;
@@ -688,7 +692,7 @@
       background: rgba(2, 6, 23, 0.9);
       backdrop-filter: blur(10px);
       z-index: 9999;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     }
 
     .left-section {
@@ -700,6 +704,7 @@
     .right-section {
       display: flex;
       gap: 12px;
+      align-items: center;
     }
 
     .top-btn {
@@ -747,12 +752,20 @@
     </div>
 
     <div class="right-section">
+      <span style="align-self:center; font-weight:600; color:#38bdf8;">
+        👤 {{ session.get('user_name') or 'User' }}
+      </span>
       <a href="/my_submissions" class="top-btn submissions-btn">📄 My Submissions</a>
       <a href="/logout" class="top-btn logout-btn">🚪 Logout</a>
     </div>
   </div>
-  <div class="container">
 
+  <!-- Optional fallback for no-JS users -->
+  <noscript>
+    <div class="error-banner" style="margin-top: 100px;">JavaScript is required for live title analysis and AI suggestions.</div>
+  </noscript>
+
+  <div class="container">
     <!-- Header -->
     <header class="header">
       <div class="gov-header">
@@ -770,30 +783,42 @@
 
     <!-- Error Banner -->
     {% if error %}
-    <div class="error-banner">⚠️ {{ error }}</div>
+    <div class="error-banner" role="alert" aria-live="polite">⚠️ {{ error }}</div>
     {% endif %}
 
     <!-- Two-Column Layout -->
     <div class="two-column-layout">
       <!-- LEFT PANEL - FORM -->
       <div class="left-panel">
+        <div id="formOverlay" style="display:none;"></div>
+        
         <h2>📝 Submit New Title</h2>
 
-        <form action="{{ url_for('submit_form') }}" method="post" id="submitForm">
-          <div id="formError" class="error-banner" style="display:none; margin-top:8px; padding:6px; font-weight:600;"></div>
+        <form action="{{ url_for('submit_form') }}" method="post" id="submitForm" autocomplete="off">
+          <!-- CSRF Token -->
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          
+          <div id="formError" class="error-banner" role="alert" aria-live="polite" style="display:none; margin-top:8px; padding:6px; font-weight:600;"></div>
 
           <!-- Publication Title -->
           <div class="form-group">
             <label for="publication_title">Publication Title *</label>
             <input id="publication_title" name="title" type="text" class="title-input"
               placeholder="Enter your publication title..." value="{{ form_data.title | default('') | e }}" required
-              autocomplete="off" />
-            <div id="spinnerContainer" style="display:none; margin-top:10px;">
-              <div id="titleSpinner" class="title-spinner">
-                <div class="spinner-ring" id="titleSpinnerRing" aria-hidden="true"></div>
-                <div class="spinner-info">
-                  <span id="titleSimPercent" class="muted" style="margin-left:8px;"></span>
-                  <span id="titleRiskLabel" style="margin-left:8px; font-weight:700;"></span>
+              autocomplete="off" maxlength="120" pattern="^[^<>]{2,120}$"
+              title="Only letters, numbers, spaces, hyphens, and ampersands allowed"
+              aria-label="Publication Title"
+              oninvalid="this.setCustomValidity('Please enter a valid publication title (max 120 characters)')"
+              oninput="this.setCustomValidity('')" />
+            <small class="muted" style="display:block; margin-top:4px;">Max 120 characters | Max 10 submissions per day</small>
+            <div id="spinnerContainerArea" style="display:none; margin-top:10px;">
+              <div id="spinnerContainer">
+                <div id="titleSpinner" class="title-spinner">
+                  <div class="spinner-ring" id="titleSpinnerRing" aria-hidden="true"></div>
+                  <div class="spinner-info">
+                    <span id="titleSimPercent" class="muted" style="margin-left:8px;"></span>
+                    <span id="titleRiskLabel" style="margin-left:8px; font-weight:700;"></span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -804,21 +829,32 @@
             <div class="form-group">
               <label for="ownerName">Owner Name *</label>
               <input id="ownerName" name="owner" type="text" class="form-input" placeholder="Owner/Publisher name..."
-                value="{{ form_data.owner | default('') | e }}" required />
+                value="{{ form_data.owner | default('') | e }}" required autocomplete="name" maxlength="80"
+                pattern="^[A-Za-z.\s]{2,80}$" title="Only letters, spaces, and dots allowed (2-80 characters)"
+                aria-label="Owner Name"
+                oninvalid="this.setCustomValidity('Please enter a valid owner name')"
+                oninput="this.setCustomValidity('')" />
             </div>
 
             <div class="form-group">
               <label for="ownerEmail">Email Address *</label>
               <input id="ownerEmail" name="email" type="email" class="form-input" placeholder="email@example.com"
-                value="{{ form_data.email | default('') | e }}" required />
-              <div id="emailError" class="error-banner"
+                value="{{ form_data.email | default('') | e }}" required autocomplete="email"
+                aria-label="Email Address"
+                oninvalid="this.setCustomValidity('Please enter a valid email address')"
+                oninput="this.setCustomValidity('')" />
+              <div id="emailError" class="error-banner" role="alert" aria-live="polite"
                 style="display:none; margin-top:8px; padding:6px; font-weight:600; background:rgba(239,68,68,0.06); border:1px solid #ef4444; color:#ef4444; border-radius:8px;">
-                Invalid email address</div>
+                Invalid email address
+              </div>
             </div>
 
             <div class="form-group">
               <label for="stateSelect">State *</label>
-              <select id="stateSelect" name="state" class="form-select" required>
+              <select id="stateSelect" name="state" class="form-select" required autocomplete="address-level1"
+                aria-label="State"
+                oninvalid="this.setCustomValidity('Please select a state')"
+                oninput="this.setCustomValidity('')">
                 <option value="">Select State...</option>
                 <option value="Andhra Pradesh" {{ 'selected' if form_data.state=='Andhra Pradesh' else '' }}>Andhra Pradesh</option>
                 <option value="Arunachal Pradesh" {{ 'selected' if form_data.state=='Arunachal Pradesh' else '' }}>Arunachal Pradesh</option>
@@ -854,7 +890,10 @@
 
             <div class="form-group">
               <label for="languageSelect">Language *</label>
-              <select id="languageSelect" name="language" class="form-select" required>
+              <select id="languageSelect" name="language" class="form-select" required autocomplete="language"
+                aria-label="Language"
+                oninvalid="this.setCustomValidity('Please select a language')"
+                oninput="this.setCustomValidity('')">
                 <option value="">Select Language...</option>
                 <option value="English" {{ 'selected' if form_data.language=='English' else '' }}>English</option>
                 <option value="Hindi" {{ 'selected' if form_data.language=='Hindi' else '' }}>Hindi</option>
@@ -876,73 +915,75 @@
           <div class="form-group">
             <label for="regNumber">Registration Number *</label>
             <input id="regNumber" name="registration_number" type="text" class="form-input"
-              placeholder="e.g., RNI/2024/12345" value="{{ form_data.registration_number | default('') | e }}" required />
-            <div id="regError" class="error-banner"
+              placeholder="e.g., RNI/2024/12345" value="{{ form_data.registration_number | default('') | e }}"
+              required autocomplete="off" pattern="^[A-Za-z0-9\/\-]+$"
+              title="Valid format: RNI/2024/12345 or similar"
+              aria-label="Registration Number"
+              oninvalid="this.setCustomValidity('Please enter a valid registration number')"
+              oninput="this.setCustomValidity('')" />
+            <div id="regError" class="error-banner" role="alert" aria-live="polite"
               style="display:none; margin-top:8px; padding:6px; font-weight:600; background:rgba(239,68,68,0.06); border:1px solid #ef4444; color:#ef4444; border-radius:8px;">
-              Registration number already exists</div>
+              Registration number already exists
+            </div>
           </div>
 
           <!-- Submit Button -->
           <div class="submit-actions">
             <button type="submit" id="submitBtn" class="btn-submit">
-              📝 Complete All Fields
+              🚀 Submit Application
             </button>
           </div>
         </form>
-
-        {% if result %}
-        <div class="result-box">
-          <h3>🔍 AI Analysis Result</h3>
-          <p><b>Similarity Score:</b> {{ result.similarity_score }}%</p>
-          <p><b>Risk Level:</b> {{ result.similarity_label }}</p>
-          {% if result.similarity_score < 30 %}
-            <p style="color: #22c55e;">✅ Safe Title</p>
-          {% elif result.similarity_score < 70 %}
-            <p style="color: #f59e0b;">⚠ Moderate Risk</p>
-          {% else %}
-            <p style="color: #ef4444;">❌ High Risk</p>
-          {% endif %}
-        </div>
-        {% endif %}
       </div>
 
       <!-- RIGHT PANEL - AI RESULTS -->
-      <div class="right-panel" id="aiPanel">
+      <div class="right-panel" id="aiPanel" aria-live="polite" aria-label="AI Analysis Results">
         <h2>✨ AI Analysis Results</h2>
+
+        <div id="emptyState" class="muted" style="text-align:center; padding:20px;">
+          Start typing a title to see AI analysis
+        </div>
 
         <div id="aiLoader" class="loading" style="display: none;">
           <div class="spinner"></div>
           <p>Analyzing title...</p>
-        </div>
+        </div> 
 
         <div id="titleAnalysisSection" style="display:none;">
+
+          <!-- Closest Match -->
           <div id="closestContainer" class="analysis-card">
             <h3><span class="section-icon">🎯</span> Closest PRGI Match</h3>
             <div id="closestPrgiBlock" class="match-text"></div>
           </div>
 
+          <!-- Risk Explanation -->
           <div id="riskExplanationContainer" class="analysis-card" style="display:none;">
             <h3><span class="section-icon">🤖</span> AI Risk Explanation</h3>
             <div id="riskExplanationText" class="match-text"></div>
+
+            <!-- 🔥 Confidence Bar -->
+            <div id="aiConfidenceBar" style="margin-top:12px;">
+              <div style="height:8px; background:#1f2937; border-radius:6px;">
+                <div id="confidenceFill"
+                  style="height:8px; width:0%; background:linear-gradient(90deg,#22c55e,#38bdf8); border-radius:6px; transition:width 0.5s ease;">
+                </div>
+              </div>
+            </div>
           </div>
 
+          <!-- Fake Detection -->
           <div id="fakeTitleWarning" class="analysis-card" style="display:none;">
             <h3><span class="section-icon">⚠</span> Suspicious Title Detection</h3>
             <div id="fakeTitleReasons" class="match-text"></div>
           </div>
 
-          <div id="spinnerContainerArea" class="analysis-card" style="margin-bottom:0.5rem; display:none;">
-            <div id="analysisSpinnerContainer"></div>
-          </div>
-
+          <!-- Suggestions -->
           <div id="suggestedContainer" class="analysis-card" style="display:none;">
             <h3><span class="section-icon">🪄</span> AI Suggested Titles</h3>
-            <div style="margin-bottom:10px;">
-              <button type="button" id="aiGenerateBtn" class="btn-submit"
-                style="padding:6px 10px; font-size:0.9rem; display:none;">Generate AI Titles</button>
-            </div>
-            <div id="aiSuggestions" class="suggestions"></div>
+            <div id="aiSuggestions"></div>
           </div>
+
         </div>
       </div>
     </div>
@@ -977,7 +1018,7 @@
     </footer>
   </div>
 
-  <script src="{{ url_for('static', filename='js/submit.js') }}?v=9.0"></script>
+  <script src="{{ url_for('static', filename='js/submit.js') }}?v=11.0"></script>
   <script>
     document.addEventListener("DOMContentLoaded", function () {
       const form = document.querySelector("#submitForm");
@@ -986,7 +1027,7 @@
       if (form && titleInput) {
         titleInput.addEventListener("input", function () {
           if (this.value.length > 2) {
-            document.querySelectorAll('.error-banner, .result-box')
+            document.querySelectorAll('.error-banner')
               .forEach(el => el.style.display = 'none');
           }
         });

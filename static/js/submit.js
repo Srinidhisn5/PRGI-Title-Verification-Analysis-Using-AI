@@ -1,6 +1,7 @@
 /**
  * PRGI AI Title Verification System - Clean Two-Column Layout
  * Single render function, single analysis flow, safe DOM access
+ * ✅ ALL FIXES APPLIED
  */
 (function () {
   'use strict';
@@ -11,9 +12,9 @@
   const rightPanel = document.getElementById('aiPanel');
   const analysisLoader = document.getElementById('aiLoader');
   const closestMatchCard = document.getElementById('closestContainer');
+  const aiTitlesList = document.getElementById('aiSuggestions');  // ✅ FIX 2: Changed from 'aiTitlesList' to 'aiSuggestions'
   const closestMatchContent = document.getElementById('closestPrgiBlock');
   const suggestionsCard = document.getElementById('suggestedContainer');
-  const suggestionsList = document.getElementById('aiSuggestions');
   const analysisSection = document.getElementById('titleAnalysisSection');
   const spinnerContainerArea = document.getElementById('spinnerContainerArea');
 
@@ -23,24 +24,27 @@
   const titleSpinnerRing = document.getElementById('titleSpinnerRing');
   const titleSimPercent = document.getElementById('titleSimPercent');
   const titleRiskLabel = document.getElementById('titleRiskLabel');
-  const aiGenerateBtn = document.getElementById('aiGenerateBtn');
-  const aiTitlesList = document.getElementById('aiSuggestions');
   const ownerEmail = document.getElementById('ownerEmail');
   const emailError = document.getElementById('emailError');
   const regNumber = document.getElementById('regNumber');
   const regError = document.getElementById('regError');
   const submitForm = document.getElementById('submitForm');
   const formError = document.getElementById('formError');
+  const formOverlay = document.getElementById('formOverlay');  // ✅ FIX: Add form overlay reference
 
   // State
   let debounceTimer = null;
   let lastSimilarity = null;
   let lastRisk = null;
+  let lastAnalyzedTitle = null;  // Added for flickering prevention
+  let lastGeneratedTitle = null;
+  let currentController = null;
+  let isGenerating = false;
 
   // Initialize
 
   function init() {
-    if (!titleInput || !rightPanel || !suggestionsList) {
+    if (!titleInput || !rightPanel || !aiTitlesList) {
       return;
     }
 
@@ -50,7 +54,6 @@
     // Also trigger analysis when value replaced or changed programmatically
     titleInput.addEventListener('change', debounce(handleTitleAnalysis, 450));
 
-    if (aiGenerateBtn) aiGenerateBtn.addEventListener('click', handleAIGenerate);
 
     // Email validation
     if (ownerEmail) ownerEmail.addEventListener('input', handleEmailInput);
@@ -69,6 +72,8 @@
 
   // Handle AI generation button - only when LOW risk and low similarity
   async function handleAIGenerate(e) {
+    if (isGenerating) return;
+    isGenerating = true;
     e && e.preventDefault && e.preventDefault();
     const title = titleInput.value.trim();
     if (!title) return;
@@ -76,51 +81,59 @@
     if (aiTitlesList) aiTitlesList.innerHTML = '<div class="muted">Generating AI suggestions…</div>';
 
     try {
-      const resp = await fetch('/generate_ai_titles', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title })
-      });
-      if (!resp.ok) throw new Error('AI generation failed');
-      const arr = await resp.json();
+      const closestMatch = document.getElementById("closestPrgiBlock")?.innerText || "";
+      const confidence = lastSimilarity || 0;
 
-      // Filter: only LOW risk and similarity < 30
-      const filtered = arr;
-      if (!filtered || filtered.length === 0) {
-        if (aiTitlesList) aiTitlesList.innerHTML = '<div class="muted">No low-risk AI titles found.</div>';
+      const resp = await fetch('/api/generate_prgi_titles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_title: title,
+          prgi_match_title: closestMatch,
+          similarity_percent: confidence
+        })
+      });
+
+      const text = await resp.text();
+      const titles = text.split("\n").filter(t => t.trim() !== "");
+
+      if (!titles.length) {
+        aiTitlesList.innerHTML = '<div class="muted">No strong AI suggestions found.</div>';
         return;
       }
 
-      // Render AI title cards
-      if (aiTitlesList) {
-        aiTitlesList.innerHTML = '';
-        filtered.forEach(item => {
-          const card = document.createElement('div');
-          card.className = 'ai-title-card';
+      // Render BEST AI titles
+      aiTitlesList.innerHTML = '';
 
-          const t = document.createElement('div'); t.className = 'ai-title-text'; t.textContent = item.title;
-          const meta = document.createElement('div'); meta.className = 'ai-title-meta'; meta.textContent = `Similarity: ${Math.round(Number(item.similarity || 0))}%`;
-          // Add a small spinner ring per AI title (color-coded by risk)
-          const spinnerWrap = document.createElement('div');
-          spinnerWrap.className = 'title-spinner';
+      titles.forEach(t => {
+        const card = document.createElement('div');
+        card.className = 'ai-title-card';
 
-          const ring = document.createElement('div');
-          ring.className = 'spinner-ring';
+        const titleText = document.createElement('div');
+        titleText.className = 'ai-title';
+        titleText.textContent = t;
 
-          // backend does not return risk, so default spinner color
-          ring.classList.add('spinner-low');
-          const info = document.createElement('div'); info.className = 'spinner-info'; info.textContent = ` ${Math.round(Number(item.similarity || 0))}%`;
-          spinnerWrap.appendChild(ring); spinnerWrap.appendChild(info);
+        const useBtn = document.createElement('button');
+        useBtn.className = 'use-btn';
+        useBtn.textContent = 'Use';
 
-          const useBtn = document.createElement('button'); useBtn.type = 'button'; useBtn.className = 'use-btn'; useBtn.textContent = 'Use';
-          useBtn.addEventListener('click', () => { titleInput.value = item.title; analyzeTitle(item.title).then(renderAnalysisResults).catch(() => { }); });
+        useBtn.onclick = () => {
+          titleInput.value = t;
+          titleInput.dispatchEvent(new Event('input'));
+        };
 
-          card.appendChild(t); card.appendChild(meta); card.appendChild(spinnerWrap); card.appendChild(useBtn);
-          aiTitlesList.appendChild(card);
-        });
-      }
+        card.appendChild(titleText);
+        card.appendChild(useBtn);
+
+        aiTitlesList.appendChild(card);
+      });
 
     } catch (err) {
+      console.error("Error:", err);
       if (aiTitlesList) aiTitlesList.innerHTML = '<div class="muted">AI generation failed.</div>';
-    }
+    }  finally {
+            isGenerating = false;
+        }
   }
 
   // Debounce function
@@ -160,7 +173,7 @@
       if (allValid) {
         submitBtn.classList.remove('disabled');
         submitBtn.disabled = false;
-        submitBtn.textContent = '✅ Submit Registration';
+        submitBtn.textContent = '🚀 Submit Application';
       } else {
         submitBtn.classList.add('disabled');
         submitBtn.disabled = true;
@@ -178,6 +191,12 @@
       hideAnalysisResults();
       return;
     }
+    // ✅ IMPROVEMENT: Better flicker prevention - check both title and similarity
+    if (title === lastAnalyzedTitle && lastSimilarity !== null) return;
+    lastAnalyzedTitle = title;
+
+    // Clear errors on input
+    if (formError) formError.style.display = "none";
 
     showLoading();
     try {
@@ -185,6 +204,7 @@
       renderAnalysisResults(data);
       console.log('Analysis completed, rendering UI');
     } catch (err) {
+      console.error("Error:", err);
       // Fail gracefully - keep UI stable
       hideAnalysisResults();
     } finally {
@@ -196,7 +216,7 @@
   function handleEmailInput(e) {
     const v = (e.target.value || '').trim();
     const ok = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
-    if (!ok && v.length > 0) {
+    if (!ok && v.length > 5) {
       if (emailError) { emailError.style.display = 'block'; emailError.textContent = 'Please enter a valid email address.'; }
       return false;
     }
@@ -213,7 +233,10 @@
       if (!resp.ok) throw new Error('check failed');
       const j = await resp.json();
       if (j.exists) { if (regError) { regError.style.display = 'block'; regError.textContent = 'Registration number already exists.'; } } else { if (regError) { regError.style.display = 'none'; regError.textContent = ''; } }
-    } catch (err) { if (regError) { regError.style.display = 'block'; regError.textContent = 'Could not verify registration uniqueness.'; } }
+    } catch (err) {
+      console.error("Error:", err);
+      if (regError) { regError.style.display = 'block'; regError.textContent = 'Could not verify registration uniqueness.'; }
+    }
   }
 
   // Handle form submit with risk-based control
@@ -228,6 +251,12 @@
     const currentTitle = titleInput.value.trim();
     if (!currentTitle) return;
 
+    // Add loading state to button
+    if (submitBtn) {
+      submitBtn.textContent = "Submitting...";
+      submitBtn.disabled = true;
+    }
+
     showLoading();
     try {
       const analysis = await analyzeTitle(currentTitle);
@@ -235,7 +264,12 @@
 
       // Block submission if HIGH risk
       if (analysis.risk === 'High' || (typeof lastRisk !== 'undefined' && lastRisk === 'High')) {
+        hideLoading();  // Hide overlay before showing error
         if (formError) { formError.style.display = 'block'; formError.textContent = 'This title appears to be HIGH RISK and cannot be submitted. Please modify the title or contact support.'; }
+        if (submitBtn) {
+          submitBtn.textContent = "🚀 Submit Application";
+          submitBtn.disabled = false;
+        }
         return;
       }
 
@@ -245,19 +279,14 @@
       submitForm.submit();
 
     } catch (err) {
+      console.error("Error:", err);
+      hideLoading();  // Hide overlay before showing error
       if (formError) { formError.style.display = 'block'; formError.textContent = 'Unable to validate title at this time. Please try again.'; }
-    } finally {
-      hideLoading();
+      if (submitBtn) {
+        submitBtn.textContent = "🚀 Submit Application";
+        submitBtn.disabled = false;
+      }
     }
-  }
-
-
-  // Compute risk according to 0-24 LOW, 25-59 MEDIUM, 60+ HIGH
-  function computeRisk(simPercent) {
-    const p = Number(simPercent) || 0;
-    if (p >= 60) return 'High';
-    if (p >= 25) return 'Medium';
-    return 'Low';
   }
 
   // Update the spinner under the title with percentage and color-coded ring
@@ -270,7 +299,13 @@
 
     titleSpinner.style.display = 'flex';
     titleSimPercent.textContent = `${Math.round(Number(simPercent) || 0)}%`;
-    titleRiskLabel.textContent = risk;
+    if (risk === "Low") {
+      titleRiskLabel.textContent = "Low Risk ✅";
+    } else if (risk === "Medium") {
+      titleRiskLabel.textContent = "Medium Risk ⚠";
+    } else {
+      titleRiskLabel.textContent = "High Risk ❌";
+    }
 
     // Remove previous classes
     titleSpinnerRing.classList.remove('spinner-low', 'spinner-medium', 'spinner-high');
@@ -286,9 +321,14 @@
 
   // Single analysis flow: similarity -> suggestions (one source)
   async function analyzeTitle(title) {
+    if (currentController) currentController.abort();
+      currentController = new AbortController();
     const simResp = await fetch('/api/check_similarity', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title })
-    });
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+      signal: currentController.signal
+});
     if (!simResp.ok) throw new Error('Similarity check failed');
     const simJson = await simResp.json();
 
@@ -304,42 +344,21 @@
       // ignore spinner errors
     }
 
-    let suggestions = [];
-
-    try {
-
-      const resp = await fetch('/generate_ai_titles', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ title })
-      });
-
-      if (resp.ok) {
-        const aiTitles = await resp.json();
-
-        if (Array.isArray(aiTitles)) {
-          suggestions = aiTitles.map(t => t.title).slice(0, 5);
-        }
-      }
-
-    } catch (e) {
-      console.error("AI suggestion error:", e);
-    }
-
-    // normalize suggestions
-    suggestions = suggestions.map(t => normalizeSingleTitle(t))
-      .filter(t => t && t.toLowerCase() !== title.toLowerCase());
+    // Removed duplicate AI suggestions fetch - now only on button click
 
     // Use backend-provided DB-only closest match. Do NOT fallback to AI suggestions or user input.
     const closest = simJson.closest_title || null;
 
     return {
       closest_title: closest,
-      suggestions,
+      suggestions: [],
       similarity: simPercent,
       risk,
+
+      // ✅ ADD THESE TWO LINES
+      top_matches: simJson.top_matches || [],
+      confidence: simJson.confidence || simPercent,
+
       explanation: simJson.explanation || "No risk explanation available.",
       fake_warning: simJson.fake_warning || false,
       fake_reasons: simJson.fake_reasons || []
@@ -361,14 +380,12 @@
     return out.join(' ').trim();
   }
 
-  function normalizeTitles(titles) {
-    return titles.map(normalizeSingleTitle);
-  }
-
   // Single render function - renders to right panel only
   function renderAnalysisResults(data) {
-    // Show right panel
-    rightPanel.classList.add('visible');
+    // ✅ FIX 1: SHOW RIGHT PANEL AT TOP
+    if (rightPanel) {
+      rightPanel.classList.add('visible');   // ✅ SHOW PANEL
+    }
 
     // Ensure spinner reflects latest values (redundant but safe)
     if (typeof data.similarity !== 'undefined' && typeof data.risk !== 'undefined') {
@@ -378,6 +395,8 @@
     // Always reveal the analysis section after analysis
     if (analysisSection) {
       analysisSection.style.display = 'block';
+      const emptyState = document.getElementById('emptyState');
+      if (emptyState) emptyState.style.display = 'none';
     }
     // Ensure spinner container area is visible when analysis runs
     if (spinnerContainerArea) {
@@ -385,22 +404,106 @@
     }
 
     // Render closest match
-    if (closestMatchCard && closestMatchContent) {
-      closestMatchCard.style.display = 'block';
+if (closestMatchCard && closestMatchContent) {
 
-      if (data.closest_title && data.closest_title !== 'None') {
-        closestMatchContent.innerHTML = `<span class="closest-match-badge">${escapeHtml(data.closest_title)}</span>`;
-      } else {
-        // Never display an empty section — show a safe placeholder that indicates no PRGI title loaded
-        closestMatchContent.innerHTML = `<span class="closest-match-badge">(No PRGI titles available)</span>`;
-      }
-    }
+  const bestMatch = data.top_matches?.[0]?.[0];
+  const bestScore = data.top_matches?.[0]?.[1];
+
+  closestMatchCard.style.display = 'block';
+
+// ❗ ADD THIS CONDITION
+  if (!bestMatch || (bestScore || 0) < 10) {
+    closestMatchContent.innerHTML = `
+      <span class="no-match-text">No strong PRGI match found</span>
+    `;
+  } else {
+    closestMatchContent.innerHTML = `
+      <span class="closest-match-badge">${escapeHtml(bestMatch)}</span>
+      <div style="margin-top:6px; font-size:13px; color:#94a3b8;">
+        Similarity: ${Math.round(bestScore || 0)}%
+      </div>
+    `;
+  }
+}
     const riskText = document.getElementById("riskExplanationText");
     const riskBox = document.getElementById("riskExplanationContainer");
-
     if (riskText && riskBox) {
-      riskText.textContent = data.explanation || "Analysis completed.";
-      riskBox.style.display = "block";
+      if (data.risk) {
+        const breakdown = data.top_matches?.[0]?.[2] || {};
+        const semantic = breakdown.semantic || 0;
+        const keywords = breakdown.jaccard || 0;
+        const phonetic = (breakdown.phonetic || 0) > 50 ? "Yes" : "No";
+        const structure = (breakdown.structure || 0) > 70 ? "Yes" : "No";
+
+        let simpleMsg = "";
+
+        if (data.risk === "Low") {
+          simpleMsg = "✅ This title is unique and safe to use.";
+        } else if (data.risk === "Medium") {
+          simpleMsg = "⚠ This title is somewhat similar to existing titles.";
+        } else {
+          simpleMsg = "❌ High risk: very similar to an existing registered title.";
+        }
+
+        const cleanPercent = value => {
+          const n = Number(value) || 0;
+          return n <= 1 ? Math.round(n * 100) : Math.round(n);
+        };
+
+        const semanticPct = Math.round(breakdown.semantic || 0);
+        const keywordPct = Math.round(breakdown.jaccard || 0);
+        const phoneticPct = Math.round(breakdown.phonetic || 0);
+        const structurePct = Math.round(breakdown.structure || 0);
+
+       let insight = "";
+
+      if (data.similarity >= 65) {
+        insight = "Strong similarity detected with an existing PRGI title.";
+      } else if (data.similarity >= 35) {
+        insight = "Moderate similarity detected — may require review.";
+      } else {
+        insight = "No significant similarity with existing titles.";
+      }
+
+        let keywordText = keywordPct > 0
+          ? `${keywordPct}% similarity in words used`
+          : "No significant shared words";
+
+        let phoneticText = phoneticPct > 50
+          ? "Sounds very similar to an existing title"
+          : phoneticPct > 20
+            ? "Slight phonetic resemblance"
+            : "No phonetic similarity detected";
+
+        let structureText = structurePct > 70
+          ? "Follows similar title structure"
+          : "Different title structure";
+
+        let html = `
+          <div style="margin-bottom:10px; font-weight:700;">
+            ${simpleMsg}
+          </div>
+
+          <div style="margin-bottom:12px; color:#cbd5e1;">
+            ${insight} (${semanticPct}% semantic similarity)
+          </div>
+
+          <div style="font-size:14px; line-height:1.7;">
+            <b style="color:#38bdf8;">Confidence Score:</b> ${data.confidence || 0}%<br><br>
+
+            <b style="color:#a78bfa;">AI Analysis</b><br>
+            • ${keywordText}<br>
+            • ${phoneticText}<br>
+            • ${structureText}<br>
+          </div>
+        `;
+
+        riskText.innerHTML = html;
+
+        riskBox.style.display = "block";
+      } else {
+        riskBox.style.display = "none";
+      }
     }
     const fakeBox = document.getElementById("fakeTitleWarning");
     const fakeText = document.getElementById("fakeTitleReasons");
@@ -418,52 +521,28 @@
       fakeBox.style.display = "none";
 
     }
-    // AI generate button visibility: only when LOW risk (and similarity < 30 optionally)
-    if (aiGenerateBtn) {
-      if (data.risk === 'Low' && Number(data.similarity) < 30) {
-        aiGenerateBtn.style.display = 'inline-block';
-      } else {
-        aiGenerateBtn.style.display = 'none';
-        if (aiTitlesList) aiTitlesList.innerHTML = '';
-      }
-    }
 
-    // Render AI suggestions
-    if (suggestionsCard && suggestionsList) {
-      suggestionsCard.style.display = 'block';
-      suggestionsList.innerHTML = "🤖 Generating AI suggestions...";
-      setTimeout(() => {
-        suggestionsList.innerHTML = '';
+    // Show suggestions container
+    if (suggestionsCard && aiTitlesList) {
 
-        if (data.suggestions && data.suggestions.length > 0) {
+      if (data.risk !== 'High') 
 
-          data.suggestions.forEach((title, index) => {
-            const item = document.createElement('div');
-            item.className = 'suggestion-item';
-            const textSpan = document.createElement('span');
-            textSpan.className = 'suggestion-text';
+        suggestionsCard.style.display = 'block';
 
-            // typing effect
-            setTimeout(() => {
-              typeWriter(textSpan, title);
-            }, index * 400);
+        // ✅ Prevent repeated API calls
+        if (titleInput.value !== lastGeneratedTitle) {
 
-            const useBtn = document.createElement('button');
-            useBtn.className = 'use-btn';
-            useBtn.textContent = 'Use';
-            useBtn.type = 'button';
-            useBtn.addEventListener('click', () => useSuggestedTitle(title));
+          aiTitlesList.innerHTML = '<div class="muted">Generating smart AI titles...</div>';
 
-            item.appendChild(textSpan);
-            item.appendChild(useBtn);
-            suggestionsList.appendChild(item);
+          lastGeneratedTitle = titleInput.value;
 
-          });
-
-        } else {
-          suggestionsCard.style.display = 'none';
+          handleAIGenerate();
         }
-      }, 700);
+
+      } else {
+        suggestionsCard.style.display = 'none';
+        aiTitlesList.innerHTML = '';
+      }
     }
   }
 
@@ -476,10 +555,20 @@
     }
   }
 
-  // Show loading state
+  // ✅ FIX 1: ENHANCED SHOW LOADING - Show panel + loader + form overlay + hide old results
   function showLoading() {
+    if (rightPanel) rightPanel.classList.add('visible');  // Show right panel
+
     if (analysisLoader) {
       analysisLoader.style.display = 'block';
+    }
+
+    if (formOverlay) {
+      formOverlay.style.display = 'block';  // ✅ FIX: Show form overlay during loading
+    }
+
+    if (analysisSection) {
+      analysisSection.style.display = 'none';   // Hide old results to prevent stale data
     }
   }
 
@@ -488,33 +577,31 @@
     if (analysisLoader) {
       analysisLoader.style.display = 'none';
     }
+
+    if (formOverlay) {
+      formOverlay.style.display = 'none';  // ✅ FIX: Hide form overlay when loading complete
+    }
   }
 
   // Hide analysis results (and hide spinner in left panel)
   function hideAnalysisResults() {
-    rightPanel.classList.remove('visible');
     if (analysisSection) analysisSection.style.display = 'none';
     if (spinnerContainer) spinnerContainer.style.display = 'none';
     if (spinnerContainerArea) spinnerContainerArea.style.display = 'none';
     if (titleSpinner) {
       titleSpinner.style.display = 'none';
     }
-  }
-  // AI typing animation
-  function typeWriter(element, text, speed = 25) {
-    let i = 0;
-    element.textContent = "";
-
-    function typing() {
-      if (i < text.length) {
-        element.textContent += text.charAt(i);
-        i++;
-        setTimeout(typing, speed);
-      }
+    if (formOverlay) {
+      formOverlay.style.display = 'none';  // ✅ FIX: Hide overlay when hiding results
     }
-
-    typing();
+    const emptyState = document.getElementById('emptyState');
+    if (emptyState) {
+      emptyState.innerHTML = 'Start typing to get real-time AI title analysis';
+      emptyState.style.display = 'block';
+    }
   }
+  // AI typing animation removed
+
   // HTML escape helper
   function escapeHtml(text) {
     const div = document.createElement('div');
@@ -528,12 +615,5 @@
   } else {
     init();
   }
-  const form = document.getElementById("submitForm");
-const button = document.getElementById("submitBtn");
-
-if (form && button) {
-    form.addEventListener("submit", function () {
-        button.innerText = "Submitting...";
-    });
-}
+  // ✅ CLEANUP: Removed duplicate submit handler that was at the bottom
 })();
