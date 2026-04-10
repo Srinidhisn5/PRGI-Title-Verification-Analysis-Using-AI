@@ -34,3 +34,8 @@ node_modules/
 
 # Raw datasets (ignore)
 database/Registered Titles*
+
+echo firebase-key.json >> .gitignore
+echo database/ >> .gitignore
+echo *.npy >> .gitignore
+echo decision_memory.json >> .gitignore.env
