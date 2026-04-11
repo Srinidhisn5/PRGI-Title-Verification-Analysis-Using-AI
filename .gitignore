@@ -1,41 +1,54 @@
 # Python cache
-__pycache__/
+
+**pycache**/
 *.pyc
 *.pyo
 *.pyd
 
 # Environment
+
 .env
 .venv/
 venv/
 
 # Database
+
 *.db
 *.sqlite3
 
 # Logs & temp
+
 *.log
 *.tmp
 
 # IDE files
+
 .vscode/
 .idea/
 
 # OS files
+
 .DS_Store
 Thumbs.db
 
 # Build files
+
 dist/
 build/
 
 # Node (if used)
+
 node_modules/
 
-# Raw datasets (ignore)
+# Raw datasets
+
 database/Registered Titles*
 
-echo firebase-key.json >> .gitignore
-echo database/ >> .gitignore
-echo *.npy >> .gitignore
-echo decision_memory.json >> .gitignore.env
+# Sensitive files
+
+firebase-key.json
+
+# Runtime/generated
+
+decision_memory.json
+*.npy
