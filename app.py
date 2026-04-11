@@ -38,6 +38,12 @@ from datetime import datetime, timezone, date
 # ✅ YOUR MODULES
 from prgi_dataset import load_prgi_titles
 from similarity_engine import compare_title, initialize_system, normalize_text
+from prgi_learning_engine import (
+    init_learning_engine,
+    maybe_rebuild,
+    rerank_matches,
+    get_smart_suggestions,
+)
 
 # ✅ LOAD DATASET
 PRGI_TITLES = load_prgi_titles()
@@ -426,14 +432,14 @@ def logout():
 @login_required
 def submit_form():
     trust_score = 50
-    user = None
+
     if session.get('user_id'):
         db = get_db()
         cur = db.cursor()
         cur.execute("SELECT trust_score FROM users WHERE id=?", (session['user_id'],))
         user = cur.fetchone()
-    if user:
-        trust_score = user['trust_score']
+        if user:
+            trust_score = user['trust_score']
 
     result = None
     error = None
@@ -442,75 +448,46 @@ def submit_form():
     if request.method == "POST":
         conn = get_db()
         cur = conn.cursor()
+
         raw_title = request.form.get("title", "").strip()
         owner = request.form.get("owner", "").strip()
-
-        if not owner:
-            return render_template(
-                "submit_form.html",
-                error="Owner name is required",
-                form_data=form_data,
-                trust_score=trust_score
-            )
         email = (request.form.get("email", "") or "").strip().lower()
         state = request.form.get("state", "").strip()
         language = request.form.get("language", "").strip()
         registration_number = request.form.get("registration_number", "").strip()
 
+        # ✅ Basic validation
+        if not owner:
+            return render_template("submit_form.html", error="Owner name is required", form_data=form_data, trust_score=trust_score)
+
         if len(raw_title) > 150:
-            return render_template(
-                "submit_form.html",
-                error="Title too long (max 150 characters)",
-                form_data=form_data,
-                trust_score=trust_score
-            )
+            return render_template("submit_form.html", error="Title too long (max 150 characters)", form_data=form_data, trust_score=trust_score)
+
         if not raw_title.strip():
-            return render_template(
-                "submit_form.html",
-                error="Title cannot be empty",
-                form_data=form_data,
-                trust_score=trust_score
-            )
+            return render_template("submit_form.html", error="Title cannot be empty", form_data=form_data, trust_score=trust_score)
+
         title = normalize_text(raw_title)
         user_id = session.get('user_id')
 
-        cur.execute("""
-        SELECT trust_score, usage_count, last_used_date 
-        FROM users 
-        WHERE id = ?
-        """, (user_id,))
-
+        # ✅ Get user usage
+        cur.execute("SELECT trust_score, usage_count, last_used_date FROM users WHERE id=?", (user_id,))
         user = cur.fetchone()
+
         if not user:
             return redirect(url_for('login_page'))
 
         today = str(date.today())
-
-        usage_count = user['usage_count']
-        if usage_count is None:
-            usage_count = 0
+        usage_count = user['usage_count'] or 0
         last_used_date = user['last_used_date'] or ""
         trust_score = user['trust_score']
 
-        # Reset if new day
         if last_used_date != today:
             usage_count = 0
-            cur.execute("""
-            UPDATE users SET usage_count = 0, last_used_date = ?
-            WHERE id = ?
-            """, (today, user_id))
+            cur.execute("UPDATE users SET usage_count=0, last_used_date=? WHERE id=?", (today, user_id))
             conn.commit()
 
-        logging.info(f"User {user_id} usage count: {usage_count}")
-
-        # LIMIT CHECK
         if usage_count >= MAX_DAILY_USAGE:
-            return render_template(
-                "submit_form.html",
-                error="🚫 Daily limit reached. Try again tomorrow.",
-                form_data=form_data,
-                trust_score=trust_score
-            )
+            return render_template("submit_form.html", error="🚫 Daily limit reached. Try again tomorrow.", form_data=form_data, trust_score=trust_score)
 
         form_data = {
             "title": title,
@@ -521,145 +498,111 @@ def submit_form():
             "registration_number": registration_number
         }
 
-        # 🔥 DUPLICATE CHECK
+        # ✅ Duplicate check
         cur.execute("""
-        SELECT 1 FROM submissions 
-        WHERE LOWER(TRIM(title)) = LOWER(TRIM(?)) AND user_id = ?
+            SELECT 1 FROM submissions 
+            WHERE LOWER(TRIM(title)) = LOWER(TRIM(?)) AND user_id = ?
         """, (title, user_id))
 
-        existing = cur.fetchone()
-
-        if existing:
-            similarity_score = 100
-            similarity_label = "High"
-
+        if cur.fetchone():
             return render_template(
                 "submit_form.html",
-                result={
-                    "similarity_score": similarity_score,
-                    "similarity_label": similarity_label
-                },
+                result={"similarity_score": 100, "similarity_label": "High"},
                 error="⚠ Exact duplicate title found in system",
                 form_data=form_data,
                 trust_score=trust_score
             )
 
-        # Run similarity ALWAYS (do not block on validation) — compute against CSV PRGI dataset
+        # 🔥 SIMILARITY ANALYSIS
         try:
             cache_key = title.lower()
 
             if cache_key in SIM_CACHE:
                 similarity_analysis = SIM_CACHE[cache_key]
             else:
-                    similarity_analysis = compare_title(title)
-                    SIM_CACHE[cache_key] = similarity_analysis
-            best_match = similarity_analysis["top_matches"][0] if similarity_analysis["top_matches"] else None
+                similarity_analysis = compare_title(title)
+                SIM_CACHE[cache_key] = similarity_analysis
+
+            # ✅ ALWAYS define (FIXED)
+            top_matches = similarity_analysis.get("top_matches", [])
+            
+            # ✅ Re-rank matches using learned patterns
+            top_matches = rerank_matches(top_matches)
+            
+            best_match = top_matches[0] if top_matches else None
 
             breakdown = best_match[2] if best_match else {
-                        "semantic": 0,
-                        "tfidf": 0,
-                        "jaccard": 0,
-                        "phonetic": 0,
-                        "edit": 0,
-                        "structure": 0
+                "semantic": 0,
+                "tfidf": 0,
+                "jaccard": 0,
+                "phonetic": 0,
+                "edit": 0,
+                "structure": 0
             }
-                    
 
-            similarity_score = similarity_analysis["similarity"]
-            similarity_label = similarity_analysis["risk"]
-            closest_title = similarity_analysis["closest_title"]
+            similarity_score = similarity_analysis.get("similarity", 0)
+            similarity_label = similarity_analysis.get("risk", "Low")
+            closest_title = top_matches[0][0] if top_matches else None
+
             if not closest_title or similarity_score < 10:
                 closest_title = None
 
-            similarity_result = {
-                "similarity": similarity_score,
-                "risk": similarity_label,
-                "closest_title": closest_title,
-                "top_matches": similarity_analysis["top_matches"],
-                "confidence": similarity_score,
-                "risk_explanation": explain_risk(title, similarity_score),
-                "analysis_status": "success"
-            }
-            result = {
-                    "similarity_score": similarity_score,
-                    "similarity_label": similarity_label,
-                    "closest_title": closest_title,
-                    "explanation": similarity_result["risk_explanation"],
-                    "confidence": similarity_score,
-                    "top_matches": similarity_result["top_matches"],
-                    "breakdown": breakdown
-            }
-        except Exception as e:
-            similarity_score, similarity_label = 0.0, 'Low'
-            similarity_result = {
-                "similarity": 0.0,
-                "risk": 'Low',
-                "closest_title": None,
-                "analysis_status": "failed",
-                "error": str(e),
+            # ✅ Fake detection
+            fake_reasons = detect_fake_title(title)
+            fake_warning = len(fake_reasons) > 0
 
-                # 🔥 ADD THESE ALSO HERE
-                "top_matches": [],
-                "confidence": 0
-            }
             result = {
                 "similarity_score": similarity_score,
                 "similarity_label": similarity_label,
-                "closest_title": similarity_result.get("closest_title", ""),
-                "explanation": similarity_result.get("risk_explanation", ""),
-                "confidence": similarity_score
+                "closest_title": closest_title,
+                "explanation": explain_risk(title, similarity_score, top_matches),
+                "confidence": similarity_score,
+                "top_matches": top_matches,
+                "breakdown": breakdown,
+                "fake_warning": fake_warning,
+                "fake_reasons": fake_reasons
             }
 
-        # Validation: if missing fields -> show error but include AI result
+        except Exception as e:
+            logging.error(f"Similarity error: {e}")
+
+            result = {
+                "similarity_score": 0,
+                "similarity_label": "Low",
+                "closest_title": None,
+                "explanation": "Analysis failed",
+                "confidence": 0,
+                "top_matches": [],
+                "breakdown": {},
+                "fake_warning": False,
+                "fake_reasons": []
+            }
+
+        # ✅ Field validation
         if not all(form_data.values()):
-            error = "All fields are required."
-            return render_template(
-                "submit_form.html",
-                error=error,
-                form_data=form_data,
-                result=result,
-                trust_score=trust_score
-            )
+            return render_template("submit_form.html", error="All fields are required.", form_data=form_data, result=result, trust_score=trust_score)
 
-        # Server-side email validation (stronger)
-        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email) or len(email) > 100:
-            error = "Please provide a valid email address."
-            return render_template(
-                "submit_form.html",
-                error=error,
-                form_data=form_data,
-                result=result,
-                trust_score=trust_score
-            )
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            return render_template("submit_form.html", error="Invalid email address.", form_data=form_data, result=result, trust_score=trust_score)
 
-        # Uniqueness check (do NOT insert if exists; show error + AI result)
-        cur.execute(
-            "SELECT 1 FROM submissions WHERE registration_number = ?",
-            (registration_number,)
-        )
+        # ✅ Registration duplicate
+        cur.execute("SELECT 1 FROM submissions WHERE registration_number=?", (registration_number,))
         if cur.fetchone():
-            error = "Registration number already exists."
-            return render_template(
-                "submit_form.html",
-                error=error,
-                form_data=form_data,
-                result=result,
-                trust_score=trust_score
-            )
+            return render_template("submit_form.html", error="Registration number already exists.", form_data=form_data, result=result, trust_score=trust_score)
 
-        # Block HIGH risk submissions (server-side enforcement)
+        # ❌ Block high risk
         if similarity_score >= 70:
-            error = "This title appears to be HIGH RISK and cannot be submitted. Please modify the title or contact support."
             return render_template(
                 "submit_form.html",
-                error=error,
+                error="This title is HIGH RISK. Modify it.",
                 form_data=form_data,
                 result=result,
                 trust_score=trust_score
             )
 
-        # Insert new submission (concurrency-safe - catch unique constraint errors)
+        # ✅ INSERT
         created_at = datetime.now(timezone.utc).isoformat()
+
         try:
             cur.execute("""
                 INSERT INTO submissions (
@@ -675,50 +618,14 @@ def submit_form():
             ))
 
             conn.commit()
-
-            today = str(date.today())
-            usage_count += 1
-
-            if similarity_score < 25:
-                trust_score += 3
-            elif similarity_score < 50:
-                trust_score += 1
-            elif similarity_score > 75:
-                trust_score -= 4
-            elif similarity_score > 60:
-                trust_score -= 2
-
-            trust_score = max(0, min(100, trust_score))
-
-            cur.execute("""
-            UPDATE users SET trust_score = ?, usage_count = ?, last_used_date = ?
-            WHERE id = ?
-            """, (trust_score, usage_count, today, user_id))
-
-            conn.commit()
-
-            logging.info(f"User {user_id} submitted title: {title} | Similarity: {similarity_score}%")
+            maybe_rebuild()
 
         except sqlite3.IntegrityError:
-            error = "Registration number already exists."
-            return render_template(
-                "submit_form.html",
-                error=error,
-                form_data=form_data,
-                result=result,
-                trust_score=trust_score
-            )
+            return render_template("submit_form.html", error="Registration number exists.", form_data=form_data, result=result, trust_score=trust_score)
 
-        submission_id = cur.lastrowid
-        return redirect(url_for('success', submission_id=submission_id))
+        return redirect(url_for('success', submission_id=cur.lastrowid))
 
-    return render_template(
-        "submit_form.html",
-        error=None,
-        form_data={},
-        result=None,
-        trust_score=trust_score
-    )
+    return render_template("submit_form.html", result=None, form_data={}, error=None, trust_score=trust_score)
 
 @app.route('/success')
 def success():
@@ -1014,11 +921,10 @@ def get_high_risk_keywords(titles):
 
     return list(found_keywords)
 
-def explain_risk(title, similarity):
+def explain_risk(title, similarity, top_matches=None):
 
     title = title.lower()
 
-    # detect common publication keywords
     common_keywords = [
         "india","indian","times","post","express",
         "news","digest","bulletin","chronicle",
@@ -1027,20 +933,53 @@ def explain_risk(title, similarity):
 
     keywords_found = [w for w in common_keywords if w in title]
 
-    # risk explanation aligned with meter thresholds
-    if similarity >= 65:
-        if keywords_found:
-            return f"High risk: The title is very similar to existing PRGI publications and contains common keywords like {', '.join(keywords_found)}."
-        return "High risk: The title is very similar to existing PRGI publications and may cause a registration conflict."
+    # ✅ Extract breakdown safely
+    breakdown = {}
+    if top_matches and len(top_matches) > 0:
+        match = top_matches[0]
+        if len(match) >= 3 and isinstance(match[2], dict):
+            breakdown = match[2]
 
-    elif similarity >= 30:
-        if keywords_found:
-            return f"Medium risk: The title has moderate similarity and contains common publication keywords like {', '.join(keywords_found)}."
-        return "Medium risk: The title has moderate similarity with existing publication titles."
+    semantic = breakdown.get("semantic", 0)
+    jaccard = breakdown.get("jaccard", 0)
+    phonetic = breakdown.get("phonetic", 0)
+    edit = breakdown.get("edit", 0)
+
+    # Convert to %
+    def pct(x):
+        return round(x * 100) if x <= 1 else round(x)
+
+    semantic = pct(semantic)
+    jaccard = pct(jaccard)
+    phonetic = pct(phonetic)
+    edit = pct(edit)
+
+    # 🔥 Build explanation
+    signals = []
+
+    if semantic > 60:
+        signals.append(f"high semantic similarity ({semantic}%)")
+
+    if jaccard > 40:
+        signals.append(f"word overlap ({jaccard}%)")
+
+    if phonetic > 50:
+        signals.append("sounds similar")
+
+    if edit > 70:
+        signals.append("almost identical wording")
+
+    signal_text = ", ".join(signals) if signals else "no strong matching signals"
+
+    # 🔥 Risk levels
+    if similarity >= 70:
+        return f"❌ High Risk: Strong similarity detected due to {signal_text}. This title may conflict with existing PRGI titles."
+
+    elif similarity >= 40:
+        return f"⚠ Medium Risk: Moderate similarity due to {signal_text}. Consider modifying the title."
 
     else:
-        return "Low risk: The title appears unique with low similarity."
-
+        return "✅ Low Risk: Title is unique with no significant similarity."
 def detect_fake_title(title):
 
     reasons = []
@@ -1055,6 +994,9 @@ def detect_fake_title(title):
         "breaking", "shocking", "exclusive",
         "viral", "must read", "alert"
     ]
+    # very short meaningless title
+    if len(title.split()) < 2:
+        reasons.append("Title too short or unclear")
 
     for word in clickbait_words:
         if title.lower().startswith(word):
@@ -1271,7 +1213,9 @@ def check_similarity():
             "closest_title": None,
             "top_matches": [],
             "confidence": 0,
-            "explanation": "Title too short"
+            "explanation": "Title too short",
+            "fake_warning": False,
+            "fake_reasons": []
         })
 
     try:
@@ -1281,35 +1225,65 @@ def check_similarity():
         risk = result.get("risk", "Low")
         closest_title = result.get("closest_title")
 
-        # ✅ ENSURE closest_title is None if no match
-        if closest_title == "No strong match found":
+        # ✅ Clean closest title
+        if not closest_title or similarity < 10:
             closest_title = None
+
+        # ✅ FIX: Safe top_matches
+        top_matches = result.get("top_matches", [])
+
+        safe_matches = []
+        for m in top_matches:
+            if len(m) >= 3 and isinstance(m[2], dict):
+                safe_matches.append(m)
+            else:
+                safe_matches.append([
+                    m[0],
+                    m[1],
+                    {
+                        "semantic": 0,
+                        "jaccard": 0,
+                        "phonetic": 0,
+                        "edit": 0,
+                        "structure": 0
+                    }
+                ])
+
+        # ✅ Re-rank matches using learned patterns
+        safe_matches = rerank_matches(safe_matches)
+
+        # ✅ Fake detection
+        fake_reasons = detect_fake_title(title)
+        fake_warning = len(fake_reasons) > 0
+        
 
         return jsonify({
             "similarity": similarity,
             "risk": risk,
             "closest_title": closest_title,
 
-            # 🔥 MOST IMPORTANT
-            "top_matches": result.get("top_matches", []),
+            "top_matches": safe_matches,
             "confidence": similarity,
 
-            # OPTIONAL BUT GOOD
-            "explanation": explain_risk(title, similarity),
-            "fake_reasons": detect_fake_title(title)
+            "explanation": explain_risk(title, similarity, safe_matches),
+
+            "fake_warning": fake_warning,
+            "fake_reasons": fake_reasons
         })
 
     except Exception as e:
         logging.error(f"Similarity API error: {e}")
+
         return jsonify({
             "similarity": 0,
             "risk": "Low",
             "closest_title": None,
             "top_matches": [],
             "confidence": 0,
-            "explanation": "Analysis failed"
+            "explanation": "Analysis failed",
+            "fake_warning": False,
+            "fake_reasons": []
         })
-
 @app.route('/api/check_registration', methods=['POST'])
 @csrf.exempt
 def api_check_registration():
@@ -1327,18 +1301,6 @@ def api_check_registration():
 @app.route('/api/generate_prgi_titles', methods=['POST'])
 @csrf.exempt
 def api_generate_prgi_titles():
-    """
-    Generate EXACTLY 5 alternative publication titles following strict PRGI rules.
-
-    Expected input JSON:
-    {
-        "user_title": "User's original title",
-        "prgi_match_title": "Closest PRGI title match",
-        "similarity_percent": 85.5
-    }
-
-    Returns: Plain text with exactly 5 lines, one title per line, nothing else.
-    """
     try:
         data = request.get_json() or request.form
 
@@ -1346,194 +1308,38 @@ def api_generate_prgi_titles():
         prgi_match_title = (data.get('prgi_match_title') or '').strip()
         similarity_percent = float(data.get('similarity_percent', 0))
 
-        if not user_title or not prgi_match_title:
-            return "Error: user_title and prgi_match_title are required", 400
+        if not user_title:
+            return "Error: user_title is required", 400
 
-        alternative_titles = generate_prgi_alternative_titles(
-            user_title,
-            prgi_match_title,
-            similarity_percent
+        suggestions = get_smart_suggestions(
+            user_title=user_title,
+            prgi_match_title=prgi_match_title,
+            similarity_percent=similarity_percent,
+            compare_fn=compare_title,
+            detect_fake_fn=detect_fake_title,
+            max_results=5,
         )
 
-        response_text = '\n'.join(alternative_titles[:5])
-
-        lines = response_text.split('\n')
-        if len(lines) < 5:
-            extra = generate_fallback_suggestions(user_title)
-            for item in extra:
-                if item["title"] not in lines:
-                    lines.append(item["title"])
-                if len(lines) >= 5:
-                    break
-
-        return '\n'.join(lines[:5]), 200, {'Content-Type': 'text/plain'}
+        return "\n".join(suggestions), 200, {'Content-Type': 'text/plain'}
 
     except Exception as e:
         logging.error(f"Error in generate_prgi_titles: {e}")
-        fallback_titles = [
-            "Regional Publication Review",
-            "State Bulletin Gazette",
-            "Local Journal Dispatch",
-            "Community News Bulletin",
-            "Public Information Chronicle"
-        ]
-        return '\n'.join(fallback_titles), 200, {'Content-Type': 'text/plain'}
 
-def validate_ai_titles(titles):
-
-    final = []
-
-    for t in titles:
-        analysis = compare_title(t)
-
-        similarity = analysis.get("similarity", 0)
-        risk = analysis.get("risk", "Low")
-        fake_flags = detect_fake_title(t)
-
-        if similarity < 30 and risk == "Low" and not fake_flags:
-            final.append(t)
-
-    return final[:5]
-
-def generate_fallback_suggestions(title):
-    """Generate rule-based suggestions if SBERT fails"""
-    from random import choice
-
-    prefixes = ['The', 'National', 'Regional', 'Local', 'Community', 'Weekly', 'Monthly']
-    suffixes = ['Review', 'Bulletin', 'Journal', 'Chronicle', 'Herald', 'Digest', 'Gazette']
-    modifiers = ['India', 'Indian', 'Weekly', 'Journal', 'Review', 'News', 'Publication']
-
-    suggestions = []
-
-    for i in range(3):
-        if i < len(prefixes):
-            suggestions.append(f"{prefixes[i]} {title}")
-
-    for i in range(3):
-        if i < len(suffixes):
-            suggestions.append(f"{title} {suffixes[i]}")
-
-    common_words = ['news', 'daily', 'bulletin', 'digest', 'weekly', 'monthly']
-    for word in common_words:
-        if word in title.lower():
-            new_title = title.lower().replace(word, choice(modifiers)).title()
-            suggestions.append(new_title)
-
-    return [{
-        "title": suggestion,
-        "similarity": round(30 + (i * 5), 1)
-    } for i, suggestion in enumerate(suggestions[:6])]
-
-def calculate_string_similarity(s1, s2):
-    """Calculate similarity between two strings (0.0 to 1.0)"""
-    words1 = set(s1.split())
-    words2 = set(s2.split())
-
-    if not words1 and not words2:
-        return 1.0
-    if not words1 or not words2:
-        return 0.0
-
-    intersection = words1.intersection(words2)
-    union = words1.union(words2)
-
-    return len(intersection) / len(union)
-
-def generate_prgi_alternative_titles(user_title, prgi_match_title, similarity_percent):
-    import re
-
-    # Extract meaningful words
-    words = re.findall(r'\b[a-zA-Z]{3,}\b', user_title.lower())
-
-    if not words:
-        return [
-            "General Technology Review",
-            "Digital Innovation Bulletin",
-            "Emerging Trends Chronicle",
-            "Future Developments Journal",
-            "Technology Insights Report"
-        ]
-
-    # --- STEP 1: Detect theme ---
-    tech_map = {
-        "tech": "Technology",
-        "technology": "Technology",
-        "digital": "Digital",
-        "ai": "AI",
-        "data": "Data",
-        "innovation": "Innovation"
-    }
-
-    theme = None
-    for w in words:
-        if w in tech_map:
-            theme = tech_map[w]
-            break
-
-    if not theme:
-        theme = words[0].title()
-
-    # --- STEP 2: Smart replacements ---
-    word_variations = {
-        "latest": ["emerging", "current", "modern"],
-        "updates": ["insights", "trends", "developments", "reports"],
-        "news": ["bulletin", "report", "chronicle"],
-        "tech": ["technology", "digital", "innovation"]
-    }
-
-    generated = []
-
-    for w in words:
-        if w in word_variations:
-            for alt in word_variations[w]:
-                new_words = [alt if x == w else x for x in words]
-                title = " ".join(new_words).title()
-                generated.append(title)
-
-    # --- STEP 3: Strong structured titles (MAIN QUALITY FIX) ---
-    structured_titles = [
-        f"{theme} Innovation Bulletin",
-        f"{theme} Trends Chronicle",
-        f"Emerging {theme} Review",
-        f"{theme} Developments Journal",
-        f"Future {theme} Insights"
-    ]
-
-    generated.extend(structured_titles)
-
-    # --- STEP 4: Clean & filter ---
-    cleaned = []
-    for t in generated:
-        t = t.strip()
-
-        # avoid very short / duplicate / ugly titles
-        if len(t.split()) < 2:
-            continue
-        if t not in cleaned:
-            cleaned.append(t)
-
-    # --- STEP 5: Ensure exactly 5 high-quality outputs ---
-    final = cleaned[:5]
-
-    # fallback safety (rare case)
-    if len(final) < 5:
+        base = user_title.split()[0].title() if user_title else "Rashtriya"
         fallback = [
-            f"{theme} Review",
-            f"{theme} Bulletin",
-            f"{theme} Chronicle",
-            f"{theme} Journal",
-            f"{theme} Insights"
+            f"{base} Bulletin",
+            f"{base} Chronicle",
+            f"Nav {base} Herald",
+            f"Jan {base} Patrika",
+            f"Lok {base} Dispatch",
         ]
-        for f in fallback:
-            if f not in final:
-                final.append(f)
-            if len(final) >= 5:
-                break
 
-    return final[:5]
+        return "\n".join(fallback), 200, {'Content-Type': 'text/plain'}
+
 if __name__ == '__main__':
     with app.app_context():
         init_db()
+        init_learning_engine(DB_PATH)
         try:
             print("✅ PRGI system initialized successfully")
         except Exception as e:
