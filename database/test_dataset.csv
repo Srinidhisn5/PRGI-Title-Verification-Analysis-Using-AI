@@ -1,0 +1,60 @@
+input_title,language,expected
+baramati samachar,english,High
+baramati news,english,High
+lok swaraj,hindi,Medium
+lok swarajya,hindi,High
+media nayak,english,Medium
+media leader,english,Medium
+banking era,english,High
+banking management review,english,Medium
+karnataka times,kannada,High
+bangalore times,english,High
+kashmir now,english,High
+kashmir crux,english,Medium
+punjab plus,punjabi,Medium
+punjab kesari,punjabi,High
+nazariya,hindi,Medium
+nazariya times,hindi,High
+parivartan,hindi,Medium
+parivartan today,hindi,High
+lok bhaskar,hindi,High
+lok bhavna,hindi,Medium
+tech world,english,Low
+global ai news,english,Low
+agriculture focus,english,Low
+village science,english,Low
+medical reporter,english,High
+medicine update,english,Medium
+legal voice,english,High
+law bulletin,english,Medium
+metro herald,english,High
+metro mirror,english,Medium
+media manch,hindi,High
+media tantra,hindi,High
+media support,english,Medium
+shramik awaz,hindi,High
+mazdoor samachar,hindi,High
+rojgar times,hindi,High
+employment news,english,Medium
+lok jagran,hindi,High
+lok jagriti,hindi,High
+navbharat,hindi,High
+new bharat,english,High
+daily express,english,High
+express daily,english,High
+bharat news,english,High
+bharat samachar,hindi,High
+india today,english,High
+today india,english,High
+news today,english,Medium
+today news,english,Medium
+krishi jagran,hindi,High
+kisan jagran,hindi,High
+desh darpan,hindi,High
+desh mirror,english,Medium
+rajdhani express,english,High
+rajdhani samachar,hindi,High
+city bulletin,english,Medium
+town bulletin,english,Medium
+state news,english,Low
+random blog name,english,Low

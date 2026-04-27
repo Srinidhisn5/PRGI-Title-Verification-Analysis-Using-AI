@@ -1,92 +1,35 @@
-from similarity_engine import compare_title
-from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score
-import matplotlib.pyplot as plt
+import pandas as pd
+from similarity_engine import compare_title, initialize_system
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+initialize_system() 
+df = pd.read_csv("database/test_dataset.csv")
 
-# =========================
-# TEST DATASET (50+ cases recommended)
-# =========================
-test_cases = [
-    # SIMILAR
-    ("indian news daily", "similar"),
-    ("india news journal", "similar"),
-    ("laxmi times", "similar"),
-    ("sandhya halchal", "similar"),
-    ("bankura barta", "similar"),
-    ("daily india news", "similar"),
-    ("news india daily", "similar"),
-    ("bharat news", "similar"),
+y_true = []
+y_pred = []
 
-    # UNIQUE
-    ("random unique xyz", "unique"),
-    ("abcd qwerty zzzz", "unique"),
-    ("unknown publication name", "unique"),
-    ("zzzz random title", "unique"),
-    ("completely new brand name", "unique"),
-    ("no match publication", "unique"),
-]
+print("\n🔍 Running Evaluation...\n")
 
-# =========================
-# EVALUATION
-# =========================
-def evaluate():
+for _, row in df.iterrows():
+    title = row["input_title"]
+    language = row["language"]
+    expected = row["expected"]
 
-    y_true = []
-    y_pred = []
+    result = compare_title(title, language=language)
+    predicted = result["risk"]
 
-    print("\n🔍 Running Full Evaluation...\n")
+    y_true.append(expected)
+    y_pred.append(predicted)
 
-    for text, expected in test_cases:
+    print(f"{title} → Expected: {expected}, Predicted: {predicted}, Score: {result['similarity']:.2f}")
 
-        result = compare_title(text)
-        score = result.get("similarity", 0)
+# 📊 METRICS
+print("\n📊 FINAL RESULTS\n")
 
-        # 🔥 Threshold (tuned)
-        if score >= 45:
-            predicted = "similar"
-        else:
-            predicted = "unique"
+accuracy = accuracy_score(y_true, y_pred)
+print(f"Accuracy: {accuracy * 100:.2f}%\n")
 
-        y_true.append(1 if expected == "similar" else 0)
-        y_pred.append(1 if predicted == "similar" else 0)
+print("Classification Report:\n")
+print(classification_report(y_true, y_pred))
 
-        print(f"{text} → Score: {score:.2f} | Pred: {predicted} | Exp: {expected}")
-
-    # =========================
-    # METRICS
-    # =========================
-    accuracy = sum([1 for i in range(len(y_true)) if y_true[i] == y_pred[i]]) / len(y_true)
-
-    precision = precision_score(y_true, y_pred)
-    recall = recall_score(y_true, y_pred)
-    f1 = f1_score(y_true, y_pred)
-
-    cm = confusion_matrix(y_true, y_pred)
-
-    print("\n==============================")
-    print(f"✅ Accuracy: {accuracy*100:.2f}%")
-    print(f"✅ Precision: {precision*100:.2f}%")
-    print(f"✅ Recall: {recall*100:.2f}%")
-    print(f"✅ F1 Score: {f1*100:.2f}%")
-    print("Confusion Matrix:")
-    print(cm)
-    print("==============================\n")
-
-    # =========================
-    # GRAPH
-    # =========================
-    labels = ["Accuracy", "Precision", "Recall", "F1"]
-    values = [accuracy*100, precision*100, recall*100, f1*100]
-
-    plt.figure()
-    plt.bar(labels, values)
-    plt.title("Model Performance Metrics")
-    plt.xlabel("Metrics")
-    plt.ylabel("Percentage")
-    plt.show()
-
-
-# =========================
-# RUN
-# =========================
-if __name__ == "__main__":
-    evaluate()
+print("Confusion Matrix:\n")
+print(confusion_matrix(y_true, y_pred))

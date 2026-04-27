@@ -1,16 +1,12 @@
 /**
- * PRGI AI Title Verification System — submit.js v13.0
+ * PRGI AI Title Verification System — submit.js v14.1
  *
- * IMPROVEMENTS over v12:
- *  - Closest match quality guard: hides/downgrades matches that look like
- *    abbreviation dumps ("a a s i news", "a d news") — these score high on
- *    phonetic/char but are meaningless to the user
- *  - AI suggestions panel: shows a loading skeleton, then animates titles in
- *    one-by-one as they arrive (instead of all-at-once flash)
- *  - "Use" button pre-fills title AND triggers re-analysis so risk updates
- *  - Suggestion cards show a tiny risk-badge generated client-side via the
- *    existing /api/check_similarity endpoint
- *  - No external dependencies — pure vanilla JS
+ * Fixes in v14.1:
+ *  - Low risk (< 30%) → hides suggestions panel entirely, shows only rewrite button
+ *  - Medium/High risk → shows full 5 AI suggestions as before
+ *  - Fake detection "Title too short" replaced with proper AI message
+ *  - NLP fake reasons no longer shown (AI handles fake detection now)
+ *  - Suggestions header badge shows "Groq AI" or "Gemini AI" correctly
  */
 (function () {
   'use strict';
@@ -39,13 +35,14 @@
   const formOverlay          = document.getElementById('formOverlay');
 
   // ── State ─────────────────────────────────────────────────────────────────
-  let debounceTimer       = null;
-  let lastSimilarity      = null;
-  let lastRisk            = null;
-  let lastAnalyzedTitle   = null;
-  let lastGeneratedTitle  = null;
-  let currentController   = null;
-  let isGenerating        = false;
+  let debounceTimer      = null;
+  let lastSimilarity     = null;
+  let lastRisk           = null;
+  let lastAnalyzedTitle  = null;
+  let lastGeneratedTitle = null;
+  let currentController  = null;
+  let isGenerating       = false;
+  let lastAnalysisData   = null;
 
   // ── INIT ──────────────────────────────────────────────────────────────────
   function init() {
@@ -93,13 +90,13 @@
 
     if (submitBtn) {
       submitBtn.classList.toggle('disabled', !allValid);
-      submitBtn.disabled   = !allValid;
+      submitBtn.disabled    = !allValid;
       submitBtn.textContent = allValid ? '🚀 Submit Application' : '📝 Complete All Fields';
     }
     return allValid;
   }
 
-  // ── TITLE ANALYSIS ────────────────────────────────────────────────────────
+  // ── TITLE ANALYSIS ENTRY POINT ────────────────────────────────────────────
   async function handleTitleAnalysis(e) {
     const title = (e.target.value || '').trim();
 
@@ -116,8 +113,15 @@
 
     showLoading();
     try {
-      const data = await analyzeTitle(title);
-      renderAnalysisResults(data);
+      // Step 1: NLP similarity (fast — SBERT engine)
+      const simData = await analyzeTitle(title);
+
+      // Step 2: Render NLP results immediately
+      renderNLPResults(simData);
+
+      // Step 3: Enhance with AI (Groq calls — parallel, non-blocking)
+      enhanceWithAI(title, simData);
+
     } catch (err) {
       console.error('Analysis error:', err);
       hideAnalysisResults();
@@ -126,7 +130,7 @@
     }
   }
 
-  // ── API: CHECK SIMILARITY ─────────────────────────────────────────────────
+  // ── API: NLP Similarity (existing engine) ─────────────────────────────────
   async function analyzeTitle(title) {
     if (currentController) currentController.abort();
     currentController = new AbortController();
@@ -146,7 +150,6 @@
 
     updateTitleSpinner(simPercent, risk);
 
-    // Quality-filter the closest match before returning
     const rawClosest = json.closest_title || null;
     const closest    = isQualityMatch(rawClosest, simPercent) ? rawClosest : null;
 
@@ -157,18 +160,11 @@
       top_matches:   json.top_matches   || [],
       confidence:    json.confidence    || simPercent,
       explanation:   json.explanation   || '',
-      fake_warning:  json.fake_warning  || false,
-      fake_reasons:  json.fake_reasons  || [],
+      // Note: NLP fake_warning intentionally NOT used — AI handles fake detection
     };
   }
 
-  /**
-   * isQualityMatch — rejects matches that look like abbreviation dumps.
-   * Titles like "a a s i news", "a d news", "a v b news" pattern:
-   *   - ≥ 40% of words are single characters
-   *   - OR average word length < 2.5 characters
-   * These are real DB entries but useless to show as "closest match".
-   */
+  // ── QUALITY GUARD ─────────────────────────────────────────────────────────
   function isQualityMatch(title, similarity) {
     if (!title || similarity < 10) return false;
     const words    = title.trim().split(/\s+/);
@@ -201,8 +197,10 @@
     lastRisk       = risk;
   }
 
-  // ── RENDER RESULTS ────────────────────────────────────────────────────────
-  function renderAnalysisResults(data) {
+  // ── RENDER NLP RESULTS ────────────────────────────────────────────────────
+  function renderNLPResults(data) {
+    lastAnalysisData = data;
+
     if (rightPanel) rightPanel.classList.add('visible');
     if (analysisSection) {
       analysisSection.style.display = 'block';
@@ -211,7 +209,7 @@
     }
     if (spinnerContainerArea) spinnerContainerArea.style.display = 'block';
 
-    // ── Closest Match ────────────────────────────────────────────────────
+    // ── Closest Match ─────────────────────────────────────────────────────
     if (closestMatchCard) {
       closestMatchCard.style.display = 'block';
       closestMatchCard.innerHTML = `
@@ -227,13 +225,13 @@
         </div>`;
     }
 
-    // ── Risk Explanation ─────────────────────────────────────────────────
-    const riskText = document.getElementById('riskExplanationText');
+    // ── Risk Explanation (placeholder while Groq loads) ───────────────────
     const riskBox  = document.getElementById('riskExplanationContainer');
+    const riskText = document.getElementById('riskExplanationText');
 
-    if (riskText && riskBox) {
-      const topMatch  = data.top_matches?.[0];
-      const bd        = (topMatch && topMatch[2]) ? topMatch[2] : {};
+    if (riskBox && riskText) {
+      const topMatch = data.top_matches?.[0];
+      const bd       = (topMatch && topMatch[2]) ? topMatch[2] : {};
 
       const semanticPct  = Math.round(bd.semantic   || 0);
       const keywordPct   = Math.round(bd.jaccard    || 0);
@@ -241,18 +239,14 @@
       const editPct      = Math.round(bd.edit       || 0);
       const specBonus    = Math.round(bd.spec_bonus || 0);
 
-      const headline = data.risk === 'Low'
-        ? (data.similarity < 15
-            ? '✅ No meaningful conflicts found — title appears unique.'
-            : '✅ Title is sufficiently unique and safe to register.')
-        : data.risk === 'Medium'
-          ? '⚠️ Moderate similarity detected — consider modifying the title.'
-          : '❌ High risk — very similar to an existing PRGI-registered title.';
+      const accentColor = data.risk === 'Low'    ? '#10b981'
+                        : data.risk === 'Medium' ? '#f59e0b' : '#ef4444';
 
       const rows = [];
       if (semanticPct > 0) {
         const lvl = semanticPct > 65 ? 'High' : semanticPct > 35 ? 'Moderate' : 'Low';
-        rows.push(signalRow('🧠 Semantic Meaning', semanticPct, `${semanticPct}% <span style="color:#64748b;font-size:11px;">(${lvl})</span>`));
+        rows.push(signalRow('🧠 Semantic Meaning', semanticPct,
+          `${semanticPct}% <span style="color:#64748b;font-size:11px;">(${lvl})</span>`));
       }
       if (keywordPct  > 0) rows.push(signalRow('🔤 Word Overlap',    keywordPct,  `${keywordPct}%`));
       if (phoneticPct > 0) rows.push(signalRow('🔊 Sounds Similar',  phoneticPct, phoneticPct > 50 ? 'Yes' : 'Slight'));
@@ -266,28 +260,23 @@
              <table style="width:100%;border-collapse:collapse;font-size:13px;">
                ${rows.join('')}
              </table>
-           </div>`
-        : '';
-
-      const accentColor = data.risk === 'Low' ? '#10b981'
-                        : data.risk === 'Medium' ? '#f59e0b' : '#ef4444';
-
-      const explHTML = data.explanation
-        ? `<div style="margin-top:12px;color:#cbd5e1;font-size:13px;line-height:1.6;
-                       padding:10px;background:rgba(255,255,255,0.03);border-radius:8px;
-                       border-left:3px solid ${accentColor};">
-             ${esc(data.explanation)}
-           </div>`
-        : '';
+           </div>` : '';
 
       riskText.innerHTML = `
-        <div style="font-weight:700;font-size:15px;margin-bottom:10px;">${headline}</div>
+        <div id="aiExplanationBlock"
+             style="margin-bottom:12px;padding:10px;background:rgba(255,255,255,0.03);
+                    border-radius:8px;border-left:3px solid ${accentColor};">
+          <div style="display:flex;align-items:center;gap:8px;color:#64748b;font-size:13px;">
+            <div class="spinner-ring" style="width:14px;height:14px;border-width:2px;
+                 border-top-color:${accentColor};"></div>
+            🤖 AI is analyzing your title...
+          </div>
+        </div>
         <div style="font-size:13px;color:#94a3b8;">
           Overall Confidence Score: <strong style="color:#38bdf8;">
             ${Math.round(data.confidence || data.similarity || 0)}%
           </strong>
         </div>
-        ${explHTML}
         ${tableHTML}`;
 
       riskBox.style.display = 'block';
@@ -303,35 +292,352 @@
       }
     }
 
-    // ── Fake Detection ────────────────────────────────────────────────────
-    const fakeBox  = document.getElementById('fakeTitleWarning');
-    const fakeText = document.getElementById('fakeTitleReasons');
-    if (data.fake_warning && data.fake_reasons.length && fakeBox && fakeText) {
-      fakeText.innerHTML = data.fake_reasons.map(r => `<div style="margin-bottom:4px;">• ${esc(r)}</div>`).join('');
-      fakeBox.style.display = 'block';
-    } else if (fakeBox) {
-      fakeBox.style.display = 'none';
-    }
+    // ── Fake Detection — hide NLP version, AI will handle it ─────────────
+    const fakeBox = document.getElementById('fakeTitleWarning');
+    if (fakeBox) fakeBox.style.display = 'none';
 
-    // ── AI Suggested Titles ───────────────────────────────────────────────
+    // ── Suggestions — LOW RISK: hide suggestions, show only rewrite button
+    //                  MEDIUM/HIGH: show full suggestions panel ─────────────
     if (suggestionsCard && aiTitlesList) {
-      if (data.risk !== 'High' || data.similarity < 75) {
+      const isLowRisk = data.risk === 'Low' || data.similarity < 30;
+
+      if (isLowRisk) {
+        // Low risk: no suggestions needed — show minimal rewrite option instead
         suggestionsCard.style.display = 'block';
+        const header = suggestionsCard.querySelector('h3');
+        if (header) {
+          header.innerHTML = `<span class="section-icon">✨</span> AI Title Tools`;
+        }
+        aiTitlesList.innerHTML = `
+          <div style="padding:12px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);
+                      border-radius:10px;margin-bottom:12px;">
+            <div style="font-size:13px;color:#10b981;font-weight:600;margin-bottom:4px;">
+              ✅ Your title looks unique
+            </div>
+            <div style="font-size:12px;color:#64748b;">
+              No similar PRGI titles found. You can proceed with registration or use AI to explore alternatives.
+            </div>
+          </div>`;
+
+        // Still show rewrite button for exploration
+        const currentTitle = titleInput.value.trim();
+        setTimeout(() => appendRewriteButton(currentTitle, ''), 200);
+
+      } else {
+        // Medium/High risk: show full suggestions
+        suggestionsCard.style.display = 'block';
+        const header = suggestionsCard.querySelector('h3');
+        if (header) {
+          header.innerHTML = `<span class="section-icon">🪄</span> AI Suggested Titles
+            <span style="font-size:11px;font-weight:700;color:#64748b;
+              background:rgba(100,116,139,0.1);padding:2px 8px;border-radius:12px;margin-left:8px;">
+              Loading...</span>`;
+        }
+        showSuggestionsSkeleton();
 
         const currentTitle = titleInput.value.trim().toLowerCase();
         if (currentTitle !== lastGeneratedTitle) {
           lastGeneratedTitle = currentTitle;
-          showSuggestionsSkeleton();
-          handleAIGenerate();
+          fetchAISuggestions(
+            titleInput.value.trim(),
+            data.closest_title || '',
+            data.similarity
+          );
         }
-      } else {
-        suggestionsCard.style.display = 'none';
-        aiTitlesList.innerHTML = '';
       }
     }
   }
 
-  // ── SIGNAL ROW HELPER ─────────────────────────────────────────────────────
+  // ── AI ENHANCEMENT ────────────────────────────────────────────────────────
+  async function enhanceWithAI(title, simData) {
+    const closest   = simData.closest_title || '';
+    const topMatch  = simData.top_matches?.[0];
+    const breakdown = (topMatch && topMatch[2]) ? topMatch[2] : {};
+
+    // Run AI explanation + fake detect together
+    fetchAIExplanation(title, closest, simData.similarity, simData.risk, breakdown);
+  }
+
+  // ── AI: Full Analysis (explanation + fake detect) ─────────────────────────
+  async function fetchAIExplanation(title, closest, simPct, risk, breakdown) {
+    try {
+      const resp = await fetch('/api/ai/full_analysis', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          user_title:         title,
+          closest_match:      closest,
+          similarity_percent: simPct,
+          risk_level:         risk,
+          breakdown:          breakdown,
+        }),
+      });
+
+      if (!resp.ok) throw new Error('AI analysis call failed');
+      const data = await resp.json();
+      if (!data.success) throw new Error(data.error || 'AI analysis failed');
+
+      updateAIExplanation(data.explanation, risk);
+
+      // Only show AI fake detection if actually suspicious
+      if (data.is_fake && data.fake_reasons && data.fake_reasons.length > 0) {
+        updateAIFakeDetection(data.fake_reasons, data.fake_confidence);
+      }
+
+    } catch (err) {
+      console.warn('AI explanation failed, using NLP fallback:', err.message);
+      clearAIExplanationSpinner(risk, simPct);
+    }
+  }
+
+  function updateAIExplanation(explanation, risk) {
+    const block = document.getElementById('aiExplanationBlock');
+    if (!block) return;
+
+    const accentColor = risk === 'Low'    ? '#10b981'
+                      : risk === 'Medium' ? '#f59e0b' : '#ef4444';
+
+    const aiLabel = `<span style="display:inline-flex;align-items:center;gap:4px;
+      font-size:11px;font-weight:700;color:#7c5cff;letter-spacing:.04em;
+      background:rgba(124,92,255,0.1);padding:2px 8px;border-radius:12px;
+      margin-bottom:8px;">✨ AI Generated</span>`;
+
+    block.style.borderLeftColor = accentColor;
+    block.innerHTML = `
+      ${aiLabel}
+      <div style="color:#cbd5e1;font-size:13px;line-height:1.65;">${esc(explanation)}</div>`;
+  }
+
+  function clearAIExplanationSpinner(risk, simPct) {
+    const block = document.getElementById('aiExplanationBlock');
+    if (!block) return;
+    const accentColor = risk === 'Low' ? '#10b981' : risk === 'Medium' ? '#f59e0b' : '#ef4444';
+    block.style.borderLeftColor = accentColor;
+    const msg = risk === 'Low'    ? '✅ Title appears sufficiently unique.'
+              : risk === 'Medium' ? '⚠️ Moderate similarity detected — consider modifying.'
+              :                    '❌ High risk — very similar to an existing registered title.';
+    block.innerHTML = `<div style="color:#cbd5e1;font-size:13px;">${msg}</div>`;
+  }
+
+  function updateAIFakeDetection(reasons, confidence) {
+    const fakeBox  = document.getElementById('fakeTitleWarning');
+    const fakeText = document.getElementById('fakeTitleReasons');
+    if (!fakeBox || !fakeText) return;
+
+    const aiLabel = `<span style="font-size:11px;font-weight:700;color:#7c5cff;
+      background:rgba(124,92,255,0.1);padding:2px 8px;border-radius:12px;margin-left:8px;">
+      ✨ AI</span>`;
+
+    fakeBox.style.display = 'block';
+    fakeText.innerHTML = `
+      ${reasons.map(r => `<div style="margin-bottom:6px;color:#fbbf24;">⚠️ ${esc(r)}</div>`).join('')}
+      <div style="margin-top:8px;font-size:12px;color:#64748b;">
+        AI Confidence: ${esc(confidence)} ${aiLabel}
+      </div>`;
+  }
+
+  // ── AI: Suggestions ───────────────────────────────────────────────────────
+  async function fetchAISuggestions(title, closest, simPct) {
+    if (isGenerating) return;
+    isGenerating = true;
+
+    try {
+      const resp = await fetch('/api/ai/suggestions', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          user_title:         title,
+          closest_match:      closest,
+          similarity_percent: simPct,
+          language:           getSelectedLanguage(),
+        }),
+      });
+
+      if (!resp.ok) throw new Error('AI suggestions failed');
+      const data = await resp.json();
+      const titles = (data.suggestions || []).slice(0, 5);
+
+      if (!titles.length || !aiTitlesList) {
+        if (aiTitlesList) aiTitlesList.innerHTML = '<div class="muted">No suggestions available.</div>';
+        return;
+      }
+
+      aiTitlesList.innerHTML = '';
+
+      // Update header badge with actual source
+      const header = suggestionsCard?.querySelector('h3');
+      if (header) {
+        const sourceLabel = data.source === 'groq' ? 'Groq AI' : 'Gemini AI';
+        header.innerHTML = `<span class="section-icon">🪄</span> AI Suggested Titles
+          <span style="font-size:11px;font-weight:700;color:#7c5cff;
+            background:rgba(124,92,255,0.1);padding:2px 8px;border-radius:12px;margin-left:8px;">
+            ✨ ${sourceLabel}</span>`;
+      }
+
+      titles.forEach((t, idx) => {
+        setTimeout(() => appendSuggestionCard(t), idx * 120);
+      });
+
+      // Rewrite button after suggestions
+      setTimeout(() => appendRewriteButton(title, closest), titles.length * 120 + 100);
+
+    } catch (err) {
+      console.error('AI suggestion error:', err);
+      // Fallback to old learning engine
+      fetchLegacySuggestions(title, closest, simPct);
+    } finally {
+      isGenerating = false;
+    }
+  }
+
+  // ── Fallback: old learning engine ─────────────────────────────────────────
+  async function fetchLegacySuggestions(title, closest, simPct) {
+    try {
+      const resp = await fetch('/api/generate_prgi_titles', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          user_title:         title,
+          prgi_match_title:   closest,
+          similarity_percent: simPct,
+        }),
+      });
+      const text   = await resp.text();
+      const titles = text.split('\n').map(t => t.trim()).filter(Boolean).slice(0, 5);
+      if (!aiTitlesList) return;
+      aiTitlesList.innerHTML = '';
+      titles.forEach((t, idx) => setTimeout(() => appendSuggestionCard(t), idx * 120));
+      setTimeout(() => appendRewriteButton(title, closest), titles.length * 120 + 100);
+    } catch (err) {
+      if (aiTitlesList) aiTitlesList.innerHTML = '<div class="muted">Suggestions unavailable.</div>';
+    }
+  }
+
+  // ── Suggestion Card ───────────────────────────────────────────────────────
+  function appendSuggestionCard(titleText) {
+    if (!aiTitlesList) return;
+    const card = document.createElement('div');
+    card.className = 'ai-title-card';
+    card.style.cssText = 'opacity:0;transform:translateY(6px);transition:opacity .25s ease,transform .25s ease;';
+
+    const text       = document.createElement('div');
+    text.className   = 'ai-title';
+    text.textContent = titleText;
+
+    const btn         = document.createElement('button');
+    btn.className     = 'use-btn';
+    btn.textContent   = 'Use';
+    btn.onclick       = () => {
+      titleInput.value   = titleText;
+      lastAnalyzedTitle  = null;
+      lastGeneratedTitle = null;
+      titleInput.dispatchEvent(new Event('input'));
+    };
+
+    card.appendChild(text);
+    card.appendChild(btn);
+    aiTitlesList.appendChild(card);
+
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      card.style.opacity   = '1';
+      card.style.transform = 'translateY(0)';
+    }));
+  }
+
+  // ── Feature 3: Make My Title Unique button ────────────────────────────────
+  function appendRewriteButton(originalTitle, closestMatch) {
+    if (!aiTitlesList) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'margin-top:14px;padding-top:12px;border-top:1px solid #1f2937;';
+
+    const btn = document.createElement('button');
+    btn.style.cssText = `
+      width:100%;padding:11px 16px;border-radius:10px;border:none;cursor:pointer;
+      background:linear-gradient(135deg,#7c5cff,#00d4ff);color:#071021;
+      font-weight:700;font-size:0.9rem;
+      transition:opacity .2s ease,transform .2s ease;`;
+    btn.innerHTML = '✨ Make My Title Unique (AI Rewrite)';
+
+    btn.onclick = async () => {
+      btn.disabled      = true;
+      btn.innerHTML     = '<span style="opacity:.7">⏳ AI is rewriting...</span>';
+      btn.style.opacity = '0.7';
+
+      try {
+        const resp = await fetch('/api/ai/rewrite', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            user_title:    originalTitle,
+            closest_match: closestMatch || '',
+            language:      getSelectedLanguage(),
+          }),
+        });
+
+        const data = await resp.json();
+
+        if (data.success && data.rewritten_title) {
+          showRewriteResult(data.rewritten_title, wrapper);
+        } else {
+          throw new Error(data.error || 'Rewrite failed');
+        }
+
+      } catch (err) {
+        btn.innerHTML     = '⚠️ Rewrite failed — try again';
+        btn.disabled      = false;
+        btn.style.opacity = '1';
+        console.error('AI rewrite error:', err);
+      }
+    };
+
+    wrapper.appendChild(btn);
+    aiTitlesList.appendChild(wrapper);
+  }
+
+  function showRewriteResult(rewrittenTitle, container) {
+    container.innerHTML = `
+      <div style="background:linear-gradient(135deg,rgba(124,92,255,0.15),rgba(0,212,255,0.1));
+                  border:1px solid rgba(124,92,255,0.4);border-radius:12px;padding:14px;">
+        <div style="font-size:11px;font-weight:700;color:#7c5cff;letter-spacing:.06em;
+                    margin-bottom:8px;">✨ AI REWRITTEN TITLE</div>
+        <div style="font-size:1.05rem;font-weight:700;color:#e6eef8;margin-bottom:12px;">
+          ${esc(rewrittenTitle)}
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button onclick="useRewrittenTitle('${esc(rewrittenTitle)}')"
+            style="flex:1;padding:9px;border-radius:8px;border:none;cursor:pointer;
+                   background:linear-gradient(135deg,#7c5cff,#00d4ff);
+                   color:#071021;font-weight:700;font-size:0.85rem;">
+            ✅ Use This Title
+          </button>
+        </div>
+      </div>`;
+  }
+
+  window.useRewrittenTitle = function (title) {
+    if (!titleInput) return;
+    titleInput.value   = title;
+    lastAnalyzedTitle  = null;
+    lastGeneratedTitle = null;
+    titleInput.dispatchEvent(new Event('input'));
+  };
+
+  // ── Suggestions skeleton ──────────────────────────────────────────────────
+  function showSuggestionsSkeleton() {
+    if (!aiTitlesList) return;
+    aiTitlesList.innerHTML = Array(5).fill(0).map((_, i) => `
+      <div class="ai-title-card" style="opacity:.4;">
+        <div class="ai-title" style="width:${140 + i * 20}px;height:14px;
+             background:linear-gradient(90deg,#1f2937 25%,#2d3748 50%,#1f2937 75%);
+             background-size:200% 100%;animation:shimmer 1.4s infinite;border-radius:6px;"></div>
+        <div class="use-btn" style="opacity:.3;pointer-events:none;">Use</div>
+      </div>`).join('') + `<style>
+        @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+      </style>`;
+  }
+
+  // ── Signal row helpers ────────────────────────────────────────────────────
   function signalRow(label, pct, value) {
     return `<tr>
       <td style="padding:4px 8px;color:#94a3b8;">${label}</td>
@@ -341,108 +647,14 @@
   }
 
   function miniBar(pct) {
-    const c = Math.min(100, Math.max(0, pct));
+    const c   = Math.min(100, Math.max(0, pct));
     const col = c > 65 ? '#ef4444' : c > 35 ? '#f59e0b' : '#22c55e';
     return `<div style="width:80px;height:6px;background:#1f2937;border-radius:4px;overflow:hidden;">
               <div style="width:${c}%;height:100%;background:${col};border-radius:4px;"></div>
             </div>`;
   }
 
-  // ── SUGGESTIONS SKELETON ──────────────────────────────────────────────────
-  function showSuggestionsSkeleton() {
-    if (!aiTitlesList) return;
-    aiTitlesList.innerHTML = Array(5).fill(0).map((_, i) => `
-      <div class="ai-title-card" style="animation-delay:${i * 80}ms; opacity:.4;">
-        <div class="ai-title" style="width:${140 + i * 20}px;height:14px;
-             background:linear-gradient(90deg,#1f2937 25%,#2d3748 50%,#1f2937 75%);
-             background-size:200% 100%;animation:shimmer 1.4s infinite;border-radius:6px;"></div>
-        <div class="use-btn" style="opacity:.3;pointer-events:none;">Use</div>
-      </div>`).join('') + `<style>
-        @keyframes shimmer {
-          0%{background-position:200% 0} 100%{background-position:-200% 0}
-        }
-      </style>`;
-  }
-
-  // ── AI TITLE GENERATION ───────────────────────────────────────────────────
-  async function handleAIGenerate() {
-    if (isGenerating) return;
-    isGenerating = true;
-
-    const title = titleInput.value.trim();
-    if (!title) { isGenerating = false; return; }
-
-    try {
-      const closestText = document.getElementById('closestPrgiBlock')?.innerText?.trim() || '';
-      const confidence  = lastSimilarity || 0;
-
-      const resp = await fetch('/api/generate_prgi_titles', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({
-          user_title:         title,
-          prgi_match_title:   closestText,
-          similarity_percent: confidence,
-        }),
-      });
-
-      const text   = await resp.text();
-      const titles = text.split('\n').map(t => t.trim()).filter(Boolean).slice(0, 5);
-
-      if (!titles.length || !aiTitlesList) {
-        if (aiTitlesList) aiTitlesList.innerHTML = '<div class="muted">No suggestions available.</div>';
-        return;
-      }
-
-      // Animate titles in one by one
-      aiTitlesList.innerHTML = '';
-      titles.forEach((t, idx) => {
-        setTimeout(() => appendSuggestionCard(t), idx * 120);
-      });
-
-    } catch (err) {
-      console.error('AI generation error:', err);
-      if (aiTitlesList) aiTitlesList.innerHTML = '<div class="muted">AI generation failed. Try again.</div>';
-    } finally {
-      isGenerating = false;
-    }
-  }
-
-  function appendSuggestionCard(titleText) {
-    if (!aiTitlesList) return;
-
-    const card = document.createElement('div');
-    card.className = 'ai-title-card';
-    card.style.cssText = 'opacity:0;transform:translateY(6px);transition:opacity .25s ease,transform .25s ease;';
-
-    const text = document.createElement('div');
-    text.className   = 'ai-title';
-    text.textContent = titleText;
-
-    const btn         = document.createElement('button');
-    btn.className     = 'use-btn';
-    btn.textContent   = 'Use';
-    btn.onclick       = () => {
-      titleInput.value = titleText;
-      lastAnalyzedTitle = null;
-      lastGeneratedTitle = null;
-      titleInput.dispatchEvent(new Event('input'));
-    };
-
-    card.appendChild(text);
-    card.appendChild(btn);
-    aiTitlesList.appendChild(card);
-
-    // Trigger animation on next frame
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        card.style.opacity   = '1';
-        card.style.transform = 'translateY(0)';
-      });
-    });
-  }
-
-  // ── EMAIL VALIDATION ──────────────────────────────────────────────────────
+  // ── Email Validation ──────────────────────────────────────────────────────
   function handleEmailInput(e) {
     const v  = (e.target.value || '').trim();
     const ok = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
@@ -450,7 +662,7 @@
     return ok;
   }
 
-  // ── REGISTRATION CHECK ────────────────────────────────────────────────────
+  // ── Registration Check ────────────────────────────────────────────────────
   async function checkRegistrationUnique(e) {
     const v = (e.target.value || '').trim();
     if (!v) { if (regError) regError.style.display = 'none'; return; }
@@ -466,16 +678,22 @@
         regError.textContent   = j.exists ? 'Registration number already exists.' : '';
       }
     } catch {
-      if (regError) { regError.style.display = 'block'; regError.textContent = 'Could not verify registration number.'; }
+      if (regError) {
+        regError.style.display = 'block';
+        regError.textContent   = 'Could not verify registration number.';
+      }
     }
   }
 
-  // ── FORM SUBMIT ───────────────────────────────────────────────────────────
+  // ── Form Submit ───────────────────────────────────────────────────────────
   async function handleFormSubmit(e) {
     e.preventDefault();
 
     if (ownerEmail && !handleEmailInput({ target: ownerEmail })) {
-      if (formError) { formError.style.display = 'block'; formError.textContent = 'Please correct the email address before submitting.'; }
+      if (formError) {
+        formError.style.display = 'block';
+        formError.textContent   = 'Please correct the email address before submitting.';
+      }
       return;
     }
 
@@ -487,11 +705,14 @@
 
     try {
       const analysis = await analyzeTitle(currentTitle);
-      renderAnalysisResults(analysis);
+      renderNLPResults(analysis);
 
       if (analysis.risk === 'High') {
         hideLoading();
-        if (formError) { formError.style.display = 'block'; formError.textContent = '❌ This title is HIGH RISK and cannot be submitted. Please modify the title.'; }
+        if (formError) {
+          formError.style.display = 'block';
+          formError.textContent   = '❌ This title is HIGH RISK and cannot be submitted. Please modify the title.';
+        }
         if (submitBtn) { submitBtn.textContent = '🚀 Submit Application'; submitBtn.disabled = false; }
         return;
       }
@@ -502,12 +723,15 @@
     } catch (err) {
       console.error('Submit error:', err);
       hideLoading();
-      if (formError) { formError.style.display = 'block'; formError.textContent = 'Unable to validate title. Please try again.'; }
+      if (formError) {
+        formError.style.display = 'block';
+        formError.textContent   = 'Unable to validate title. Please try again.';
+      }
       if (submitBtn) { submitBtn.textContent = '🚀 Submit Application'; submitBtn.disabled = false; }
     }
   }
 
-  // ── UI HELPERS ────────────────────────────────────────────────────────────
+  // ── UI Helpers ────────────────────────────────────────────────────────────
   function showLoading() {
     if (rightPanel)      rightPanel.classList.add('visible');
     if (analysisLoader)  analysisLoader.style.display  = 'block';
@@ -521,26 +745,32 @@
   }
 
   function hideAnalysisResults() {
-    if (analysisSection)      analysisSection.style.display      = 'none';
-    if (spinnerContainer)     spinnerContainer.style.display      = 'none';
-    if (spinnerContainerArea) spinnerContainerArea.style.display  = 'none';
-    if (titleSpinner)         titleSpinner.style.display          = 'none';
-    if (formOverlay)          formOverlay.style.display           = 'none';
+    if (analysisSection)      analysisSection.style.display     = 'none';
+    if (spinnerContainer)     spinnerContainer.style.display     = 'none';
+    if (spinnerContainerArea) spinnerContainerArea.style.display = 'none';
+    if (titleSpinner)         titleSpinner.style.display         = 'none';
+    if (formOverlay)          formOverlay.style.display          = 'none';
 
     const empty = document.getElementById('emptyState');
-    if (empty) { empty.textContent = 'Start typing to get real-time AI title analysis'; empty.style.display = 'block'; }
-
+    if (empty) {
+      empty.textContent  = 'Start typing to get real-time AI title analysis';
+      empty.style.display = 'block';
+    }
     lastSimilarity = null;
     lastRisk       = null;
   }
 
+  function getSelectedLanguage() {
+    return document.getElementById('languageSelect')?.value || 'English';
+  }
+
   function esc(text) {
     const d = document.createElement('div');
-    d.textContent = text;
+    d.textContent = String(text);
     return d.innerHTML;
   }
 
-  // ── BOOT ──────────────────────────────────────────────────────────────────
+  // ── Boot ──────────────────────────────────────────────────────────────────
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {

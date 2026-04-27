@@ -44,7 +44,7 @@ from prgi_learning_engine import (
     rerank_matches,
     get_smart_suggestions,
 )
-
+from api_ai_routes import ai_bp, exempt_from_csrf
 # ✅ LOAD DATASET
 PRGI_TITLES = load_prgi_titles()
 
@@ -60,6 +60,8 @@ if not app.secret_key:
 
 # ✅ CSRF PROTECTION
 csrf = CSRFProtect(app)
+app.register_blueprint(ai_bp)
+exempt_from_csrf(csrf, ai_bp)
 
 # ✅ HARDENED SESSION CONFIG
 app.config.update(
